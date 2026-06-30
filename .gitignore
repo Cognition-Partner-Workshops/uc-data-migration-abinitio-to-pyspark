@@ -1,0 +1,24 @@
+# Pipeline outputs (namespaced, disposable)
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Reconciliation reports
+reconciliation_report.md

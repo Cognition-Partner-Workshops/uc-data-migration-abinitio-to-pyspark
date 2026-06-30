@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r verify/requirements.txt
+
+      - name: Lint
+        run: |
+          ruff check src verify seed tests
+          ruff format --check src verify seed tests
+
+      - name: Reconciliation loop (seed -> run -> reconcile)
+        run: make demo-up NS=ci
+
+      - name: Tests
+        run: make test
