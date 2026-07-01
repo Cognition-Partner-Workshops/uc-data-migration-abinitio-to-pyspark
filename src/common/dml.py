@@ -25,6 +25,7 @@ from pathlib import Path
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    ArrayType,
     DecimalType,
     IntegerType,
     LongType,
@@ -61,6 +62,31 @@ ORDER_SCHEMA = StructType(
         StructField("item_count", IntegerType(), True),
         StructField("amount", DecimalType(12, 2), True),
         StructField("currency", StringType(), True),
+    ]
+)
+
+# order_items.dml, comma-delimited with two *parallel repeating vectors*:
+#
+#   record
+#     decimal(",") order_id;
+#     decimal(",") item_count;
+#     string(",")[item_count]  item_names;
+#     decimal(",")[item_count] item_quantities;
+#     string("\n") order_status;
+#   end;
+#
+# Both vectors are sized by the single item_count field, so item_names[i] pairs
+# positionally with item_quantities[i]. This cannot be read with the fixed-width
+# StructType CSV reader (the column count varies per row with item_count), so
+# read_order_items() below parses it from raw text. This StructType documents the
+# parsed record shape that reader returns (one row per order, vectors intact).
+ORDER_ITEMS_SCHEMA = StructType(
+    [
+        StructField("order_id", LongType(), False),
+        StructField("item_count", IntegerType(), True),
+        StructField("item_names", ArrayType(StringType()), True),
+        StructField("item_quantities", ArrayType(LongType()), True),
+        StructField("order_status", StringType(), True),
     ]
 )
 
@@ -113,6 +139,47 @@ def read_orders(spark: SparkSession) -> DataFrame:
 def read_transactions(spark: SparkSession) -> DataFrame:
     """Read transactions.dat per transaction_detail.dml (pipe-delimited)."""
     return _read_delimited(spark, "transactions.dat", TRANSACTION_SCHEMA, "|")
+
+
+def read_order_items(spark: SparkSession) -> DataFrame:
+    """Read order_items.dat per order_items.dml, returning one row per order with
+    the two parallel repeating vectors intact (item_names, item_quantities).
+
+    The record is variable-width (its token count depends on item_count), so the
+    fixed-schema CSV reader cannot describe it. We parse the comma-delimited text
+    directly, reproducing the DML record contract exactly:
+
+    - ``item_count`` (field 2) governs how many tokens each vector consumes, so we
+      slice exactly ``item_count`` names then exactly ``item_count`` quantities,
+      starting right after the two header fields. This bounds any downstream
+      explode to item_count — never more, never fewer.
+    - ``order_status`` is the newline-terminated tail, i.e. the final token.
+    - ``order_status`` has **no** ``null(...)`` default in the DML (unlike the
+      ``channel = null("UNKNOWN")`` field in transaction_detail.dml). A blank is
+      therefore preserved as the empty string it is read as — we deliberately do
+      *not* substitute a default and, by splitting the raw text ourselves, do not
+      let Spark's CSV reader coerce the blank to NULL.
+    """
+    path = str(RAW_DIR / "order_items.dat")
+    lines = spark.read.text(path).where(F.length(F.trim(F.col("value"))) > 0)
+    toks = lines.select(F.split(F.col("value"), ",").alias("t"))
+    parsed = toks.select(
+        F.col("t").getItem(0).cast(LongType()).alias("order_id"),
+        F.col("t").getItem(1).cast(IntegerType()).alias("item_count"),
+        F.col("t").alias("t"),
+    )
+    # item_names  = t[2 : 2 + item_count]   (Spark slice is 1-based -> start = 3)
+    # item_quantities = t[2 + item_count : 2 + 2*item_count]
+    # order_status = last token (newline-terminated tail)
+    return parsed.select(
+        "order_id",
+        "item_count",
+        F.expr("slice(t, 3, item_count)").alias("item_names"),
+        F.expr(
+            "transform(slice(t, 3 + item_count, item_count), x -> cast(x as bigint))"
+        ).alias("item_quantities"),
+        F.element_at(F.col("t"), F.size(F.col("t"))).alias("order_status"),
+    )
 
 
 def trimmed(df: DataFrame) -> DataFrame:

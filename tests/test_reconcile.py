@@ -13,7 +13,7 @@ import shutil
 import pytest
 
 from src.common.io import OUT_ROOT
-from src.jobs import mart_daily_orders, stg_customers, stg_orders
+from src.jobs import int_order_items, mart_daily_orders, stg_customers, stg_orders
 from src.common.spark import build_spark
 from verify.reconcile import Reconciler
 
@@ -26,6 +26,7 @@ def built_namespace():
     spark.sparkContext.setLogLevel("ERROR")
     stg_customers.run(spark, NS)
     stg_orders.run(spark, NS)
+    int_order_items.run(spark, NS)
     mart_daily_orders.run(spark, NS)
     spark.stop()
     yield
@@ -42,6 +43,7 @@ def test_outputs_exist():
     for layer, table in [
         ("staging", "customers"),
         ("staging", "orders"),
+        ("intermediate", "order_items"),
         ("marts", "daily_orders"),
     ]:
         assert (OUT_ROOT / NS / layer / table).exists()
@@ -54,6 +56,16 @@ def test_main_controls_pass():
         "orders_completeness",
         "orders_control_total",
         "orders_daily_parity",
+    ]:
+        assert results[name].status == "PASS", f"{name}: {results[name].detail}"
+
+
+def test_order_items_controls_pass():
+    results = _results()
+    for name in [
+        "order_items_completeness",
+        "order_items_quantity_control_total",
+        "order_items_explode_parity",
     ]:
         assert results[name].status == "PASS", f"{name}: {results[name].detail}"
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 
 from src.common.spark import build_spark
-from src.jobs import mart_daily_orders, stg_customers, stg_orders
+from src.jobs import int_order_items, mart_daily_orders, stg_customers, stg_orders
 
 
 def main() -> None:
@@ -37,6 +37,7 @@ def main() -> None:
         print(f"[pipeline] namespace={ns}")
         print("  staging.customers   <- ", stg_customers.run(spark, ns))
         print("  staging.orders      <- ", stg_orders.run(spark, ns))
+        print("  intermediate.order_items <- ", int_order_items.run(spark, ns))
         print("  marts.daily_orders  <- ", mart_daily_orders.run(spark, ns))
         print("[pipeline] done")
     finally:

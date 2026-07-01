@@ -207,12 +207,173 @@ class Reconciler:
             )
         )
 
+    # ------------------------------------------------ order_items (explode graph)
+    def _source_order_items_exploded(self):
+        """Re-derive the exploded source independently of the job under test, so a
+        parity failure means the job diverged, not that we compared it to itself."""
+        src = dml.read_order_items(self.spark)
+        return (
+            src.withColumn("pair", F.arrays_zip("item_names", "item_quantities"))
+            .select(
+                "order_id",
+                F.posexplode("pair").alias("item_seq", "pair"),
+                "order_status",
+            )
+            .select(
+                "order_id",
+                (F.col("item_seq") + F.lit(1)).alias("item_seq"),
+                F.col("pair.item_names").alias("s_name"),
+                F.col("pair.item_quantities").alias("s_qty"),
+                F.coalesce(F.col("order_status"), F.lit("")).alias("s_status"),
+            )
+        )
+
+    def check_order_items_completeness(self):
+        """The exploded intermediate must have exactly SUM(item_count) rows across
+        source orders (no row loss, no fan-out beyond item_count) and preserve the
+        order count (every source order still present)."""
+        src = dml.read_order_items(self.spark)
+        src_orders = src.count()
+        expected_rows = src.agg(F.sum("item_count")).collect()[0][0]
+        if not self._target_exists("intermediate", "order_items"):
+            self.results.append(
+                CheckResult(
+                    "order_items_completeness",
+                    "SKIP",
+                    "intermediate.order_items not produced yet",
+                )
+            )
+            return
+        tgt = self._read_target("intermediate", "order_items")
+        actual_rows = tgt.count()
+        actual_orders = tgt.select("order_id").distinct().count()
+        ok = (expected_rows == actual_rows) and (src_orders == actual_orders)
+        self.results.append(
+            CheckResult(
+                "order_items_completeness",
+                "PASS" if ok else "FAIL",
+                f"source SUM(item_count) = {expected_rows}, exploded rows = {actual_rows}; "
+                f"source orders = {src_orders}, target orders = {actual_orders}",
+                {
+                    "expected_rows": expected_rows,
+                    "actual_rows": actual_rows,
+                    "src_orders": src_orders,
+                    "actual_orders": actual_orders,
+                },
+            )
+        )
+
+    def check_order_items_quantity_control_total(self):
+        """Total quantity across all exploded items must tie out to the source: the
+        sum of every item_quantities element over all order records."""
+        if not self._target_exists("intermediate", "order_items"):
+            self.results.append(
+                CheckResult(
+                    "order_items_quantity_control_total",
+                    "SKIP",
+                    "intermediate.order_items not produced yet",
+                )
+            )
+            return
+        src_total = (
+            dml.read_order_items(self.spark)
+            .withColumn(
+                "q",
+                F.expr(
+                    "aggregate(item_quantities, cast(0 as bigint), (acc, x) -> acc + x)"
+                ),
+            )
+            .agg(F.sum("q"))
+            .collect()[0][0]
+        )
+        tgt_total = (
+            self._read_target("intermediate", "order_items")
+            .agg(F.sum("item_quantity"))
+            .collect()[0][0]
+        )
+        ok = src_total == tgt_total
+        self.results.append(
+            CheckResult(
+                "order_items_quantity_control_total",
+                "PASS" if ok else "FAIL",
+                f"source SUM(item_quantities) = {src_total}, "
+                f"target SUM(item_quantity) = {tgt_total}",
+                {"expected": str(src_total), "actual": str(tgt_total)},
+            )
+        )
+
+    def check_order_items_explode_parity(self):
+        """Per-value parity for the explode/mapping class: each (order_id, item_seq)
+        pair's item_name and item_quantity must match the source positionally, the
+        blank-preserved order_status must match, and each order's exploded item
+        count must equal its source item_count — value-for-value, not aggregate."""
+        if not self._target_exists("intermediate", "order_items"):
+            self.results.append(
+                CheckResult(
+                    "order_items_explode_parity",
+                    "SKIP",
+                    "intermediate.order_items not produced yet",
+                )
+            )
+            return
+        src_ex = self._source_order_items_exploded()
+        tgt = self._read_target("intermediate", "order_items").select(
+            "order_id",
+            "item_seq",
+            F.col("item_name").alias("t_name"),
+            F.col("item_quantity").alias("t_qty"),
+            F.col("order_status").alias("t_status"),
+        )
+        joined = src_ex.join(tgt, ["order_id", "item_seq"], "full_outer")
+        pair_mismatches = joined.where(
+            (F.col("s_name") != F.col("t_name"))
+            | (F.col("s_qty") != F.col("t_qty"))
+            | (F.col("s_status") != F.col("t_status"))
+            | F.col("s_name").isNull()
+            | F.col("t_name").isNull()
+        ).count()
+
+        # Per-order count must equal the source item_count contract.
+        src_counts = dml.read_order_items(self.spark).select(
+            "order_id", F.col("item_count").alias("s_items")
+        )
+        tgt_counts = (
+            self._read_target("intermediate", "order_items")
+            .groupBy("order_id")
+            .agg(F.count("*").alias("t_items"))
+        )
+        count_mismatches = (
+            src_counts.join(tgt_counts, "order_id", "full_outer")
+            .where(
+                (F.col("s_items") != F.col("t_items"))
+                | F.col("s_items").isNull()
+                | F.col("t_items").isNull()
+            )
+            .count()
+        )
+        ok = pair_mismatches == 0 and count_mismatches == 0
+        self.results.append(
+            CheckResult(
+                "order_items_explode_parity",
+                "PASS" if ok else "FAIL",
+                f"{pair_mismatches} (order_id,item_seq) pair(s) diverge; "
+                f"{count_mismatches} order(s) with per-order count != source item_count",
+                {
+                    "pair_mismatches": pair_mismatches,
+                    "count_mismatches": count_mismatches,
+                },
+            )
+        )
+
     # ------------------------------------------------------------------- driver
     def run(self) -> bool:
         self.check_customers_completeness()
         self.check_orders_completeness()
         self.check_orders_control_total()
         self.check_orders_daily_parity()
+        self.check_order_items_completeness()
+        self.check_order_items_quantity_control_total()
+        self.check_order_items_explode_parity()
         self.check_transactions_channel_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
