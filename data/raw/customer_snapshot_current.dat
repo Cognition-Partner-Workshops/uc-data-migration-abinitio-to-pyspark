@@ -1,0 +1,50 @@
+1001,John Smith,189 Main St,New York,NY,10001,615-203-9483,john.smith1001@example.com,ACTIVE
+1002,Jane Williams,798 Oak Ave,Chicago,IL,60601,811-297-6451,jane.williams1002@example.com,ACTIVE
+1003,Bob Garcia,505 Pine Rd,Houston,TX,77001,302-221-8864,bob.garcia1003@example.com,ACTIVE
+1004,Alice Anderson,644 Elm St,Phoenix,AZ,85001,207-383-4009,alice.anderson1004@example.com,ACTIVE
+1005,Charlie Moore,244 Maple Dr,Philadelphia,PA,19101,718-948-3169,charlie.moore1005@example.com,ACTIVE
+1006,Diana Harris,518 Cedar Ln,San Antonio,TX,78201,962-473-1751,diana.harris1006@example.com,ACTIVE
+1007,Edward Young,447 Birch Way,San Diego,CA,92101,759-805-4410,edward.young1007@example.com,ACTIVE
+1008,Fiona Doe,153 Spruce Ct,Dallas,TX,75201,478-296-7964,fiona.doe1008@example.com,INACTIVE
+1009,George Brown,880 Walnut Pl,San Jose,CA,95101,639-816-3657,george.brown1009@example.com,PENDING
+1010,Helen Lee,981 Ash Blvd,Austin,TX,73301,596-312-9311,helen.lee1010@example.com,ACTIVE
+1011,Ivan Taylor,949 Main St,New York,NY,10001,919-503-1485,ivan.taylor1011@example.com,PENDING
+1012,Julia Jackson,428 Oak Ave,Chicago,IL,60601,556-878-5124,julia.jackson1012@example.com,ACTIVE
+1013,Kevin Clark,528 Pine Rd,Houston,TX,77001,416-675-4926,kevin.clark1013@example.com,INACTIVE
+1014,Laura King,364 Elm St,Phoenix,AZ,85001,459-718-6038,laura.king1014@example.com,ACTIVE
+1015,Mike Johnson,635 Maple Dr,Philadelphia,PA,19101,243-346-6805,mike.johnson1015@example.com,ACTIVE
+1016,Nina Martinez,568 Cedar Ln,San Antonio,TX,78201,211-694-8135,nina.martinez1016@example.com,ACTIVE
+1017,Oscar Wilson,205 Birch Way,San Diego,CA,92101,726-559-1691,oscar.wilson1017@example.com,ACTIVE
+1018,Paula Thomas,664 Spruce Ct,Dallas,TX,75201,503-782-8160,paula.thomas1018@example.com,ACTIVE
+1019,Quinn White,767 Walnut Pl,San Jose,CA,95101,405-679-1284,quinn.white1019@example.com,ACTIVE
+1020,Rachel Lewis,684 Ash Blvd,Austin,TX,73301,287-835-2487,rachel.lewis1020@example.com,ACTIVE
+1021,John Smith,539 Main St,New York,NY,10001,299-459-2982,john.smith1021@example.com,INACTIVE
+1022,Jane Williams,945 Oak Ave,Chicago,IL,60601,328-432-3678,jane.williams1022@example.com,INACTIVE
+1023,Bob Garcia,895 Pine Rd,Houston,TX,77001,910-403-5119,bob.garcia1023@example.com,INACTIVE
+1024,Alice Anderson,788 Elm St,Phoenix,AZ,85001,414-624-2116,alice.anderson1024@example.com,ACTIVE
+1025,Charlie Moore,192 Maple Dr,Philadelphia,PA,19101,338-919-7686,charlie.moore1025@example.com,ACTIVE
+1026,Diana Harris,878 Cedar Ln,San Antonio,TX,78201,741-799-8058,diana.harris1026@example.com,ACTIVE
+1027,Edward Young,566 Birch Way,San Diego,CA,92101,726-321-8639,edward.young1027@example.com,INACTIVE
+1028,Fiona Doe,588 Spruce Ct,Dallas,TX,75201,737-598-4400,fiona.doe1028@example.com,PENDING
+1029,George Brown,787 Walnut Pl,San Jose,CA,95101,694-633-5603,george.brown1029@example.com,ACTIVE
+1030,Helen Lee,183 Ash Blvd,Austin,TX,73301,657-575-7028,helen.lee1030@example.com,PENDING
+1031,Ivan Taylor,211 Main St,New York,NY,10001,246-632-6942,ivan.taylor1031@example.com,PENDING
+1032,Julia Jackson,136 Oak Ave,Chicago,IL,60601,353-798-1709,julia.jackson1032@example.com,INACTIVE
+1033,Kevin Clark,114 Pine Rd,Houston,TX,77001,392-512-1132,kevin.clark1033@example.com,ACTIVE
+1034,Laura King,640 Elm St,Phoenix,AZ,85001,796-235-3323,laura.king1034@example.com,ACTIVE
+1035,Mike Johnson,355 Maple Dr,Philadelphia,PA,19101,310-844-4914,mike.johnson1035@example.com,ACTIVE
+1036,Nina Martinez,137 Cedar Ln,San Antonio,TX,78201,326-842-9018,nina.martinez1036@example.com,INACTIVE
+1037,Oscar Wilson,845 Birch Way,San Diego,CA,92101,705-451-1083,oscar.wilson1037@example.com,ACTIVE
+1038,Paula Thomas,888 Spruce Ct,Dallas,TX,75201,709-946-1235,paula.thomas1038@example.com,INACTIVE
+1039,Quinn White,827 Walnut Pl,San Jose,CA,95101,409-431-8574,quinn.white1039@example.com,PENDING
+1040,Rachel Lewis,503 Ash Blvd,Austin,TX,73301,217-469-3314,rachel.lewis1040@example.com,PENDING
+1041,John Smith,837 Main St,New York,NY,10001,695-939-5294,john.smith1041@example.com,ACTIVE
+1042,Jane Williams,797 Oak Ave,Chicago,IL,60601,650-748-6752,jane.williams1042@example.com,ACTIVE
+1043,Bob Garcia,535 Pine Rd,Houston,TX,77001,691-892-8080,bob.garcia1043@example.com,PENDING
+1044,Alice Anderson,465 Elm St,Phoenix,AZ,85001,616-238-7713,alice.anderson1044@example.com,ACTIVE
+1045,Charlie Moore,556 Maple Dr,Philadelphia,PA,19101,980-891-3959,charlie.moore1045@example.com,PENDING
+1046,Diana Harris,464 Cedar Ln,San Antonio,TX,78201,973-650-6191,diana.harris1046@example.com,ACTIVE
+1047,Edward Young,813 Birch Way,San Diego,CA,92101,967-618-8630,edward.young1047@example.com,ACTIVE
+1048,Fiona Doe,899 Spruce Ct,Dallas,TX,75201,701-344-5530,fiona.doe1048@example.com,ACTIVE
+1049,George Brown,603 Walnut Pl,San Jose,CA,95101,808-292-4602,george.brown1049@example.com,INACTIVE
+1050,Helen Lee,665 Ash Blvd,Austin,TX,73301,473-220-3523,helen.lee1050@example.com,INACTIVE

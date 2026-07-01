@@ -51,6 +51,24 @@ CUSTOMER_SCHEMA = StructType(
     ]
 )
 
+# customer master snapshot for the CDC graph, comma-delimited.
+# Combined customer.dml + customer_address.dml record (name + address sub-fields +
+# phone + email + status). This is the record graphs/cdc_processor.py compares
+# between the current and previous snapshot (psets/pset_templates/customer_cdc.pset).
+CUSTOMER_MASTER_SCHEMA = StructType(
+    [
+        StructField("customer_id", LongType(), False),
+        StructField("name", StringType(), True),
+        StructField("street", StringType(), True),
+        StructField("city", StringType(), True),
+        StructField("state", StringType(), True),
+        StructField("zip", StringType(), True),
+        StructField("phone", StringType(), True),
+        StructField("email", StringType(), True),
+        StructField("status", StringType(), True),
+    ]
+)
+
 # order extract, pipe-delimited (account_balance.dml-style decimal("|") layout)
 ORDER_SCHEMA = StructType(
     [
@@ -103,6 +121,19 @@ def _read_delimited(
 def read_customers(spark: SparkSession) -> DataFrame:
     """Read customers.dat per customer.dml + customer_address.dml (comma-delimited)."""
     return _read_delimited(spark, "customers.dat", CUSTOMER_SCHEMA, ",")
+
+
+def read_customer_snapshot(spark: SparkSession, which: str) -> DataFrame:
+    """Read a customer-master CDC snapshot ("current" or "previous").
+
+    Comma-delimited per customer.dml + customer_address.dml. These are the
+    snapshot files the CDC graph (graphs/cdc_processor.py) compares.
+    """
+    if which not in ("current", "previous"):
+        raise ValueError(f"snapshot must be 'current' or 'previous', got {which!r}")
+    return _read_delimited(
+        spark, f"customer_snapshot_{which}.dat", CUSTOMER_MASTER_SCHEMA, ","
+    )
 
 
 def read_orders(spark: SparkSession) -> DataFrame:

@@ -13,7 +13,7 @@ import shutil
 import pytest
 
 from src.common.io import OUT_ROOT
-from src.jobs import mart_daily_orders, stg_customers, stg_orders
+from src.jobs import customer_cdc, mart_daily_orders, stg_customers, stg_orders
 from src.common.spark import build_spark
 from verify.reconcile import Reconciler
 
@@ -27,6 +27,7 @@ def built_namespace():
     stg_customers.run(spark, NS)
     stg_orders.run(spark, NS)
     mart_daily_orders.run(spark, NS)
+    customer_cdc.run(spark, NS)
     spark.stop()
     yield
     shutil.rmtree(OUT_ROOT / NS, ignore_errors=True)
@@ -43,6 +44,7 @@ def test_outputs_exist():
         ("staging", "customers"),
         ("staging", "orders"),
         ("marts", "daily_orders"),
+        ("curated", "customer_cdc"),
     ]:
         assert (OUT_ROOT / NS / layer / table).exists()
 
@@ -61,3 +63,15 @@ def test_main_controls_pass():
 def test_transactions_control_skips_until_converted():
     results = _results()
     assert results["transactions_channel_parity"].status == "SKIP"
+
+
+def test_customer_cdc_controls_pass():
+    results = _results()
+    for name in [
+        "customer_cdc_completeness",
+        "customer_cdc_control_total",
+        "customer_cdc_insert_parity",
+        "customer_cdc_delete_parity",
+        "customer_cdc_update_parity",
+    ]:
+        assert results[name].status == "PASS", f"{name}: {results[name].detail}"

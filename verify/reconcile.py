@@ -44,6 +44,17 @@ from pyspark.sql import functions as F  # noqa: E402
 from src.common import dml  # noqa: E402
 from src.common.io import OUT_ROOT, layer_path  # noqa: E402
 from src.common.spark import build_spark  # noqa: E402
+from src.jobs import customer_cdc  # noqa: E402
+
+# customer_cdc.pset contract, transcribed here so reconcile verifies the converted
+# job against the PSET *independently* — it re-derives the expected INSERT/UPDATE/
+# DELETE from the raw snapshots rather than trusting the job's classification.
+#   define KEY_COLUMNS  customer_id
+#   define HASH_COLUMNS customer_id,name,address,phone,email,status
+CDC_KEY = ["customer_id"]
+CDC_HASH = ["customer_id", "name", "address", "phone", "email", "status"]
+CDC_ATTRS = [c for c in CDC_HASH if c not in CDC_KEY]
+CDC_OUT_COLS = ["customer_id"] + CDC_ATTRS + ["row_hash"]
 
 
 @dataclass
@@ -207,6 +218,237 @@ class Reconciler:
             )
         )
 
+    # ------------------------------------------------------- customer CDC checks
+    def _cdc_master(self, which: str):
+        """Independent reconstruction of the customer-master snapshot the CDC
+        compares — the address consolidation + PSET row hash, re-derived here from
+        the raw snapshot rather than imported from the job."""
+        raw = dml.read_customer_snapshot(self.spark, which)
+        master = raw.select(
+            "customer_id",
+            "name",
+            F.concat_ws(", ", "street", "city", "state", "zip").alias("address"),
+            "phone",
+            "email",
+            "status",
+        )
+        parts = [F.coalesce(F.col(c).cast("string"), F.lit("")) for c in CDC_HASH]
+        return master.withColumn("_h", F.md5(F.concat_ws("||", *parts)))
+
+    def _cdc_frames(self):
+        if getattr(self, "_cdc_cache", None) is None:
+            cur = self._cdc_master("current").cache()
+            prv = self._cdc_master("previous").cache()
+            self._cdc_cache = (cur, prv)
+        return self._cdc_cache
+
+    def _cdc_output(self):
+        return self._read_target("curated", "customer_cdc")
+
+    def _cdc_exists(self) -> bool:
+        return self._target_exists("curated", "customer_cdc")
+
+    @staticmethod
+    def _expected_rows(frame):
+        """Project a master frame to the CDC output column contract."""
+        return frame.select("customer_id", *CDC_ATTRS, F.col("_h").alias("row_hash"))
+
+    def check_customer_cdc_completeness(self):
+        """Every key in the source (current) ∪ target (previous) population must be
+        accounted for by the CDC output plus the (unchanged) remainder — no row
+        loss, no fan-out."""
+        if not self._cdc_exists():
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_completeness",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet",
+                )
+            )
+            return
+        cur, prv = self._cdc_frames()
+        out = self._cdc_output()
+        union_keys = (
+            cur.select("customer_id")
+            .union(prv.select("customer_id"))
+            .distinct()
+            .count()
+        )
+        in_both = (
+            cur.select("customer_id")
+            .join(prv.select("customer_id"), "customer_id", "inner")
+            .count()
+        )
+        n_ins = out.where(F.col("change_type") == "INSERT").count()
+        n_upd = out.where(F.col("change_type") == "UPDATE").count()
+        n_del = out.where(F.col("change_type") == "DELETE").count()
+        unchanged = in_both - n_upd
+        accounted = n_ins + n_upd + unchanged + n_del
+        ok = accounted == union_keys and unchanged >= 0
+        self.results.append(
+            CheckResult(
+                "customer_cdc_completeness",
+                "PASS" if ok else "FAIL",
+                f"source∪target keys = {union_keys}, accounted "
+                f"(INSERT {n_ins} + UPDATE {n_upd} + UNCHANGED {unchanged} + "
+                f"DELETE {n_del}) = {accounted}",
+                {"union_keys": union_keys, "accounted": accounted},
+            )
+        )
+
+    def check_customer_cdc_control_total(self):
+        """Control total: INSERT + UPDATE + UNCHANGED must tie out to the source
+        (current) population, and DELETE to the target-only (previous) population."""
+        if not self._cdc_exists():
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_control_total",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet",
+                )
+            )
+            return
+        cur, prv = self._cdc_frames()
+        out = self._cdc_output()
+        src_rows = cur.count()
+        target_only = (
+            prv.select("customer_id")
+            .join(cur.select("customer_id"), "customer_id", "left_anti")
+            .count()
+        )
+        in_both = (
+            cur.select("customer_id")
+            .join(prv.select("customer_id"), "customer_id", "inner")
+            .count()
+        )
+        n_ins = out.where(F.col("change_type") == "INSERT").count()
+        n_upd = out.where(F.col("change_type") == "UPDATE").count()
+        n_del = out.where(F.col("change_type") == "DELETE").count()
+        unchanged = in_both - n_upd
+        ok = (n_ins + n_upd + unchanged == src_rows) and (n_del == target_only)
+        self.results.append(
+            CheckResult(
+                "customer_cdc_control_total",
+                "PASS" if ok else "FAIL",
+                f"INSERT+UPDATE+UNCHANGED = {n_ins + n_upd + unchanged} "
+                f"(source rows = {src_rows}); DELETE = {n_del} "
+                f"(target-only rows = {target_only})",
+                {"src_rows": src_rows, "target_only": target_only},
+            )
+        )
+
+    def _cdc_class_parity(self, change_type: str, expected):
+        """Value-for-value parity for one CDC class: the output rows of that class
+        must equal the independently-derived expected rows exactly (every attribute
+        AND the PSET row hash)."""
+        out = (
+            self._cdc_output()
+            .where(F.col("change_type") == change_type)
+            .select(*CDC_OUT_COLS)
+        )
+        expected = expected.select(*CDC_OUT_COLS)
+        missing = expected.exceptAll(out).count()
+        extra = out.exceptAll(expected).count()
+        n_exp = expected.count()
+        ok = missing == 0 and extra == 0
+        return ok, n_exp, missing, extra
+
+    def check_customer_cdc_insert_parity(self):
+        """INSERT parity: keys in source not target, emitting the source values."""
+        if not self._cdc_exists():
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_insert_parity",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet",
+                )
+            )
+            return
+        cur, prv = self._cdc_frames()
+        expected = self._expected_rows(
+            cur.join(prv.select("customer_id"), "customer_id", "left_anti")
+        )
+        ok, n_exp, missing, extra = self._cdc_class_parity("INSERT", expected)
+        self.results.append(
+            CheckResult(
+                "customer_cdc_insert_parity",
+                "PASS" if ok else "FAIL",
+                f"{n_exp} expected INSERT rows; {missing} missing, {extra} unexpected "
+                f"(value-for-value incl. row hash)",
+                {"expected": n_exp, "missing": missing, "extra": extra},
+            )
+        )
+
+    def check_customer_cdc_delete_parity(self):
+        """DELETE parity: keys in target not source, emitting the prior values."""
+        if not self._cdc_exists():
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_delete_parity",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet",
+                )
+            )
+            return
+        cur, prv = self._cdc_frames()
+        expected = self._expected_rows(
+            prv.join(cur.select("customer_id"), "customer_id", "left_anti")
+        )
+        ok, n_exp, missing, extra = self._cdc_class_parity("DELETE", expected)
+        self.results.append(
+            CheckResult(
+                "customer_cdc_delete_parity",
+                "PASS" if ok else "FAIL",
+                f"{n_exp} expected DELETE rows; {missing} missing, {extra} unexpected "
+                f"(value-for-value incl. row hash)",
+                {"expected": n_exp, "missing": missing, "extra": extra},
+            )
+        )
+
+    def check_customer_cdc_update_parity(self):
+        """UPDATE parity: keys in both whose PSET row hash changed, emitting the
+        source values. Also asserts the job's HASH_COLUMNS equals the PSET compare
+        columns exactly — i.e. the row hash is over customer_id,name,address,phone,
+        email,status in that order."""
+        if not self._cdc_exists():
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_update_parity",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet",
+                )
+            )
+            return
+        if customer_cdc.HASH_COLUMNS != CDC_HASH or customer_cdc.KEY_COLUMNS != CDC_KEY:
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_update_parity",
+                    "FAIL",
+                    f"job compare columns {customer_cdc.HASH_COLUMNS} / key "
+                    f"{customer_cdc.KEY_COLUMNS} do not match the PSET "
+                    f"{CDC_HASH} / {CDC_KEY}",
+                )
+            )
+            return
+        cur, prv = self._cdc_frames()
+        changed_keys = (
+            cur.alias("c")
+            .join(prv.alias("p"), "customer_id", "inner")
+            .where(F.col("c._h") != F.col("p._h"))
+            .select("customer_id")
+        )
+        expected = self._expected_rows(cur.join(changed_keys, "customer_id", "inner"))
+        ok, n_exp, missing, extra = self._cdc_class_parity("UPDATE", expected)
+        self.results.append(
+            CheckResult(
+                "customer_cdc_update_parity",
+                "PASS" if ok else "FAIL",
+                f"{n_exp} expected UPDATE rows (hash over PSET compare columns); "
+                f"{missing} missing, {extra} unexpected (value-for-value incl. row hash)",
+                {"expected": n_exp, "missing": missing, "extra": extra},
+            )
+        )
+
     # ------------------------------------------------------------------- driver
     def run(self) -> bool:
         self.check_customers_completeness()
@@ -214,6 +456,11 @@ class Reconciler:
         self.check_orders_control_total()
         self.check_orders_daily_parity()
         self.check_transactions_channel_parity()
+        self.check_customer_cdc_completeness()
+        self.check_customer_cdc_control_total()
+        self.check_customer_cdc_insert_parity()
+        self.check_customer_cdc_delete_parity()
+        self.check_customer_cdc_update_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
 
