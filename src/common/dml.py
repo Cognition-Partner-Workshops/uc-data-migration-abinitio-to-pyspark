@@ -64,6 +64,22 @@ ORDER_SCHEMA = StructType(
     ]
 )
 
+# Customer-master snapshot for the CDC pipeline (run_customer_cdc.ksh /
+# customer_cdc.pset). The record carries exactly the pset's HASH_COLUMNS in
+# declared order — customer_id,name,address,phone,email,status — and is
+# pipe-delimited so the free-text address may contain commas. This is the input
+# both the previous- and current-snapshot components bind to.
+CUSTOMER_MASTER_SCHEMA = StructType(
+    [
+        StructField("customer_id", LongType(), False),
+        StructField("name", StringType(), True),
+        StructField("address", StringType(), True),
+        StructField("phone", StringType(), True),
+        StructField("email", StringType(), True),
+        StructField("status", StringType(), True),
+    ]
+)
+
 # transaction_detail.dml, pipe-delimited flattened header
 TRANSACTION_SCHEMA = StructType(
     [
@@ -113,6 +129,33 @@ def read_orders(spark: SparkSession) -> DataFrame:
 def read_transactions(spark: SparkSession) -> DataFrame:
     """Read transactions.dat per transaction_detail.dml (pipe-delimited)."""
     return _read_delimited(spark, "transactions.dat", TRANSACTION_SCHEMA, "|")
+
+
+# Column order matters: it is the customer_cdc.pset HASH_COLUMNS list, and the CDC
+# row hash concatenates these values in exactly this order.
+CUSTOMER_MASTER_HASH_COLUMNS = [
+    "customer_id",
+    "name",
+    "address",
+    "phone",
+    "email",
+    "status",
+]
+CUSTOMER_MASTER_KEY_COLUMNS = ["customer_id"]
+
+
+def read_customer_snapshot_previous(spark: SparkSession) -> DataFrame:
+    """Read the previous customer-master snapshot (CDC PREVIOUS_SNAPSHOT_PATH)."""
+    return _read_delimited(
+        spark, "customer_snapshot_previous.dat", CUSTOMER_MASTER_SCHEMA, "|"
+    )
+
+
+def read_customer_snapshot_current(spark: SparkSession) -> DataFrame:
+    """Read the current customer-master snapshot (CDC CURRENT_SNAPSHOT_PATH)."""
+    return _read_delimited(
+        spark, "customer_snapshot_current.dat", CUSTOMER_MASTER_SCHEMA, "|"
+    )
 
 
 def trimmed(df: DataFrame) -> DataFrame:

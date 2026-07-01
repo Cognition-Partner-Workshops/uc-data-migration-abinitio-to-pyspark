@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -207,6 +208,176 @@ class Reconciler:
             )
         )
 
+    # -------------------------------------------------- customer CDC (live target)
+    @staticmethod
+    def _legacy_row_hash(values: list[str]) -> str:
+        """The exact CDCProcessor row hash: md5 of the HASH_COLUMNS joined by '||'.
+
+        Mirrors ``ts-python-abinitio-etl`` ``cdc_processor.py``
+        (``hashlib.md5("||".join(row.values).encode()).hexdigest()`` over
+        ``df[cols].astype(str)``). This is the independent legacy oracle the Spark
+        job's hash is reconciled against — recomputed here from the raw snapshots,
+        not from the converted job, so the two implementations must agree.
+        """
+        return hashlib.md5("||".join(values).encode()).hexdigest()
+
+    def _read_snapshot(self, filename: str) -> dict[str, list[str]]:
+        """Read a pipe-delimited customer-master snapshot from data/raw/ into
+        {customer_id: [HASH_COLUMNS values]} — the source side of the CDC check."""
+        cols = dml.CUSTOMER_MASTER_HASH_COLUMNS
+        rows: dict[str, list[str]] = {}
+        text = (dml.RAW_DIR / filename).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if not line:
+                continue
+            fields = line.split("|")
+            record = dict(zip(cols, fields))
+            key = record["customer_id"].strip()
+            rows[key] = [record[c].strip() for c in cols]
+        return rows
+
+    def _cdc_expected(self) -> dict[str, set]:
+        """Recompute INSERT/UPDATE/DELETE key sets from the raw snapshots using the
+        legacy row hash — the oracle for the CDC parity controls."""
+        current = self._read_snapshot("customer_snapshot_current.dat")
+        previous = self._read_snapshot("customer_snapshot_previous.dat")
+        cur_keys, prev_keys = set(current), set(previous)
+        inserts = cur_keys - prev_keys
+        deletes = prev_keys - cur_keys
+        updates = {
+            k
+            for k in (cur_keys & prev_keys)
+            if self._legacy_row_hash(current[k]) != self._legacy_row_hash(previous[k])
+        }
+        return {
+            "inserts": inserts,
+            "updates": updates,
+            "deletes": deletes,
+            "current": cur_keys,
+            "previous": prev_keys,
+        }
+
+    def _cdc_actual(self) -> dict[str, set]:
+        """The Spark job's change set, grouped into key sets per operation."""
+        rows = (
+            self._read_target("curated", "customer_cdc")
+            .select(F.col("customer_id").cast("string").alias("k"), "cdc_operation")
+            .collect()
+        )
+        actual: dict[str, set] = {"INSERT": set(), "UPDATE": set(), "DELETE": set()}
+        for r in rows:
+            actual[r["cdc_operation"]].add(r["k"])
+        return actual
+
+    def check_customer_cdc_completeness(self):
+        """No silent row loss / fan-out: exactly one change record per genuinely
+        new key (INSERT) and per removed key (DELETE), and no key is emitted under
+        more than one operation."""
+        if not self._target_exists("curated", "customer_cdc"):
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_completeness",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet (live conversion target)",
+                )
+            )
+            return
+        exp = self._cdc_expected()
+        act = self._cdc_actual()
+        n_out = len(act["INSERT"]) + len(act["UPDATE"]) + len(act["DELETE"])
+        distinct = act["INSERT"] | act["UPDATE"] | act["DELETE"]
+        ok = (
+            len(act["INSERT"]) == len(exp["inserts"])
+            and len(act["DELETE"]) == len(exp["deletes"])
+            and len(distinct) == n_out  # no key under two operations / no fan-out
+        )
+        self.results.append(
+            CheckResult(
+                "customer_cdc_completeness",
+                "PASS" if ok else "FAIL",
+                f"source only-current = {len(exp['inserts'])}, only-previous = "
+                f"{len(exp['deletes'])}; job INSERT = {len(act['INSERT'])}, "
+                f"DELETE = {len(act['DELETE'])}, distinct change keys = "
+                f"{len(distinct)} of {n_out} records",
+                {
+                    "inserts": len(act["INSERT"]),
+                    "deletes": len(act["DELETE"]),
+                    "records": n_out,
+                },
+            )
+        )
+
+    def check_customer_cdc_control_total(self):
+        """Control total: SUM(customer_id) over the whole change set ties out to the
+        same sum over the independently-recomputed changed keys."""
+        if not self._target_exists("curated", "customer_cdc"):
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_control_total",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet (live conversion target)",
+                )
+            )
+            return
+        exp = self._cdc_expected()
+        expected_keys = exp["inserts"] | exp["updates"] | exp["deletes"]
+        exp_total = sum(int(k) for k in expected_keys)
+        act_total = (
+            self._read_target("curated", "customer_cdc")
+            .agg(F.sum("customer_id"))
+            .collect()[0][0]
+        )
+        act_total = int(act_total) if act_total is not None else 0
+        ok = exp_total == act_total
+        self.results.append(
+            CheckResult(
+                "customer_cdc_control_total",
+                "PASS" if ok else "FAIL",
+                f"source SUM(changed customer_id) = {exp_total}, "
+                f"job SUM(customer_id) = {act_total}",
+                {"expected": exp_total, "actual": act_total},
+            )
+        )
+
+    def check_customer_cdc_parity(self):
+        """Per-class parity: the INSERT/UPDATE/DELETE key sets the job produces must
+        match, value-for-value, the sets recomputed from the raw snapshots with the
+        legacy '||' MD5 row hash. This is what proves the row hash — including the
+        pset's key-in-hash quirk — was reproduced exactly, not just that totals
+        happen to tie out."""
+        if not self._target_exists("curated", "customer_cdc"):
+            self.results.append(
+                CheckResult(
+                    "customer_cdc_parity",
+                    "SKIP",
+                    "curated.customer_cdc not produced yet (live conversion target)",
+                )
+            )
+            return
+        exp = self._cdc_expected()
+        act = self._cdc_actual()
+        diffs = {
+            "INSERT": (exp["inserts"] ^ act["INSERT"]),
+            "UPDATE": (exp["updates"] ^ act["UPDATE"]),
+            "DELETE": (exp["deletes"] ^ act["DELETE"]),
+        }
+        n_bad = sum(len(v) for v in diffs.values())
+        ok = n_bad == 0
+        detail = (
+            f"INSERT {len(act['INSERT'])}/{len(exp['inserts'])}, "
+            f"UPDATE {len(act['UPDATE'])}/{len(exp['updates'])}, "
+            f"DELETE {len(act['DELETE'])}/{len(exp['deletes'])} "
+            f"(job/source); {n_bad} key(s) misclassified"
+        )
+        self.results.append(
+            CheckResult(
+                "customer_cdc_parity",
+                "PASS" if ok else "FAIL",
+                detail,
+                {"misclassified": n_bad},
+            )
+        )
+
     # ------------------------------------------------------------------- driver
     def run(self) -> bool:
         self.check_customers_completeness()
@@ -214,6 +385,9 @@ class Reconciler:
         self.check_orders_control_total()
         self.check_orders_daily_parity()
         self.check_transactions_channel_parity()
+        self.check_customer_cdc_completeness()
+        self.check_customer_cdc_control_total()
+        self.check_customer_cdc_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
 
