@@ -177,6 +177,106 @@ class Reconciler:
             )
         )
 
+    def check_transactions_completeness(self):
+        """Curated transactions (flattened line items) must equal the source
+        line-item population — the explode of the DML ``line_items[item_count]``
+        array must neither drop a transaction nor fan out beyond the array."""
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_completeness",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        # Each source extract row is one flattened line item (item_count = 1),
+        # so the source line-item population is the raw row count and must equal
+        # SUM(item_count); the curated table (post-explode) must match both.
+        src = dml.read_transactions(self.spark)
+        expected_rows = src.count()
+        expected_line_items = src.agg(F.sum("item_count")).collect()[0][0]
+        target = self._read_target("curated", "transactions")
+        actual = target.count()
+        distinct_txns = target.select("txn_id").distinct().count()
+        ok = (
+            actual == expected_rows == expected_line_items
+            and distinct_txns == expected_rows
+        )
+        self.results.append(
+            CheckResult(
+                "transactions_completeness",
+                "PASS" if ok else "FAIL",
+                f"source rows = {expected_rows}, SUM(item_count) = {expected_line_items}, "
+                f"curated rows = {actual}, distinct txns = {distinct_txns}",
+                {
+                    "expected_rows": expected_rows,
+                    "expected_line_items": expected_line_items,
+                    "actual": actual,
+                    "distinct_txns": distinct_txns,
+                },
+            )
+        )
+
+    def check_transactions_control_total(self):
+        """Line-item economics must tie out: curated SUM(line_total * quantity)
+        must equal the source SUM(merchant_info.amount) transaction total."""
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_control_total",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        src_total = (
+            dml.read_transactions(self.spark).agg(F.sum("amount")).collect()[0][0]
+        )
+        tgt_total = (
+            self._read_target("curated", "transactions")
+            .agg(F.sum(F.col("line_total") * F.col("quantity")))
+            .collect()[0][0]
+        )
+        ok = src_total == tgt_total
+        self.results.append(
+            CheckResult(
+                "transactions_control_total",
+                "PASS" if ok else "FAIL",
+                f"source SUM(amount) = {src_total}, "
+                f"curated SUM(line_total*quantity) = {tgt_total}",
+                {"expected": str(src_total), "actual": str(tgt_total)},
+            )
+        )
+
+    def check_transactions_merchant_default_parity(self):
+        """The curated table must apply the DML default merchant_name = null("") —
+        a blank source merchant name becomes the empty string, never NULL."""
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_merchant_default_parity",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        nulls = (
+            self._read_target("curated", "transactions")
+            .where(F.col("merchant_name").isNull())
+            .count()
+        )
+        ok = nulls == 0
+        self.results.append(
+            CheckResult(
+                "transactions_merchant_default_parity",
+                "PASS" if ok else "FAIL",
+                f"{nulls} transaction(s) with NULL merchant_name "
+                f"(expected the DML default '' for blanks)",
+                {"null_merchant_names": nulls},
+            )
+        )
+
     def check_transactions_channel_parity(self):
         """Live-converted control: the curated transactions table must apply the
         DML default channel = null("UNKNOWN") — a blank source channel becomes the
@@ -213,6 +313,9 @@ class Reconciler:
         self.check_orders_completeness()
         self.check_orders_control_total()
         self.check_orders_daily_parity()
+        self.check_transactions_completeness()
+        self.check_transactions_control_total()
+        self.check_transactions_merchant_default_parity()
         self.check_transactions_channel_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
