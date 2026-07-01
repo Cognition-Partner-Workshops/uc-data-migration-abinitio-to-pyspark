@@ -66,6 +66,11 @@ extracts and the converted tables:
 | `orders_control_total` | mart `SUM(total_amount)` ties out to source `SUM(amount)` |
 | `orders_daily_parity` | per `order_date`, count + total match the source |
 | `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (live-conversion target) |
+| `customer_cdc_completeness` | CDC output + unchanged account for the full source∪target key population |
+| `customer_cdc_control_total` | INSERT+UPDATE+UNCHANGED ties to source rows; DELETE to target-only rows |
+| `customer_cdc_insert_parity` | INSERT rows match source-not-target keys, value-for-value incl. PSET row hash |
+| `customer_cdc_delete_parity` | DELETE rows match target-not-source keys, value-for-value incl. PSET row hash |
+| `customer_cdc_update_parity` | UPDATE rows match keys whose PSET row hash changed, value-for-value |
 
 `verify/reconcile.py` exits non-zero on any FAIL, so it doubles as the CI gate.
 

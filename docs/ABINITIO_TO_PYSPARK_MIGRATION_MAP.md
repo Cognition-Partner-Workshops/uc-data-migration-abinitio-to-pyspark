@@ -58,7 +58,7 @@ DML lives in the source repo's `dml/`; the PySpark equivalents are in
 | Daily orders extract→staging (`run_daily_orders.ksh` ph.1-3) | `src/jobs/stg_orders.py` | on `main` | typed read + date parse |
 | Orders production rollover (`run_daily_orders.ksh` ph.4) | `src/jobs/mart_daily_orders.py` | on `main` | rollup → `groupBy().agg()` |
 | Transactions detail (`transaction_detail.dml`) | `src/jobs/stg_transactions.py` → `curated/transactions` | **live conversion** | flatten nested line items + DML defaults |
-| Customer CDC (`cdc_processor.py`, `customer_cdc.pset`) | `src/jobs/cdc_customers.py` | **live conversion** | compare-by-key + row hash → Delta MERGE analog |
+| Customer CDC (`cdc_processor.py`, `customer_cdc.pset`) | `src/jobs/customer_cdc.py` → `curated/customer_cdc` | converted | compare-by-key + row hash → INSERT/UPDATE/DELETE |
 
 "Live conversion" rows are the work Devin does during the demo via
 `!convert-abinitio-to-pyspark`; `main` carries the durable before-state plus the
