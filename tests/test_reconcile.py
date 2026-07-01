@@ -13,11 +13,12 @@ import shutil
 import pytest
 
 from src.common.io import OUT_ROOT
-from src.jobs import mart_daily_orders, stg_customers, stg_orders
+from src.jobs import curated_transactions, mart_daily_orders, stg_customers, stg_orders
 from src.common.spark import build_spark
 from verify.reconcile import Reconciler
 
 NS = "pytest"
+NS_TXN = "pytest_txn"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -30,6 +31,19 @@ def built_namespace():
     spark.stop()
     yield
     shutil.rmtree(OUT_ROOT / NS, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def built_transactions():
+    spark = build_spark("pytest-txn-build")
+    spark.sparkContext.setLogLevel("ERROR")
+    stg_customers.run(spark, NS_TXN)
+    stg_orders.run(spark, NS_TXN)
+    mart_daily_orders.run(spark, NS_TXN)
+    curated_transactions.run(spark, NS_TXN)
+    spark.stop()
+    yield
+    shutil.rmtree(OUT_ROOT / NS_TXN, ignore_errors=True)
 
 
 def _results():
@@ -60,4 +74,23 @@ def test_main_controls_pass():
 
 def test_transactions_control_skips_until_converted():
     results = _results()
-    assert results["transactions_channel_parity"].status == "SKIP"
+    for name in [
+        "transactions_completeness",
+        "transactions_control_total",
+        "transactions_channel_parity",
+        "transactions_merchant_name_parity",
+    ]:
+        assert results[name].status == "SKIP", f"{name}: {results[name].detail}"
+
+
+def test_transactions_controls_pass_once_converted(built_transactions):
+    rec = Reconciler(NS_TXN)
+    rec.run()
+    results = {r.name: r for r in rec.results}
+    for name in [
+        "transactions_completeness",
+        "transactions_control_total",
+        "transactions_channel_parity",
+        "transactions_merchant_name_parity",
+    ]:
+        assert results[name].status == "PASS", f"{name}: {results[name].detail}"

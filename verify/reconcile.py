@@ -177,11 +177,70 @@ class Reconciler:
             )
         )
 
+    def check_transactions_completeness(self):
+        """Curated transactions must equal the source transaction population — no
+        silent row loss and (since line_items is kept as a nested array, not
+        exploded) no fan-out. SKIPs until the transactions pipeline is converted."""
+        expected = dml.read_transactions(self.spark).count()
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_completeness",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        actual = self._read_target("curated", "transactions").count()
+        ok = expected == actual
+        self.results.append(
+            CheckResult(
+                "transactions_completeness",
+                "PASS" if ok else "FAIL",
+                f"source transactions = {expected}, curated transactions = {actual}",
+                {"expected": expected, "actual": actual},
+            )
+        )
+
+    def check_transactions_control_total(self):
+        """Total transaction amount in the curated table must tie out to the
+        source extract (the amount lives in the merchant_info sub-record)."""
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_control_total",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        src_total = (
+            dml.read_transactions(self.spark).agg(F.sum("amount")).collect()[0][0]
+        )
+        cur_total = (
+            self._read_target("curated", "transactions")
+            .agg(F.sum("merchant_info.amount"))
+            .collect()[0][0]
+        )
+        ok = src_total == cur_total
+        self.results.append(
+            CheckResult(
+                "transactions_control_total",
+                "PASS" if ok else "FAIL",
+                f"source SUM(amount) = {src_total}, "
+                f"curated SUM(merchant_info.amount) = {cur_total}",
+                {"expected": str(src_total), "actual": str(cur_total)},
+            )
+        )
+
     def check_transactions_channel_parity(self):
         """Live-converted control: the curated transactions table must apply the
         DML default channel = null("UNKNOWN") — a blank source channel becomes the
-        literal 'UNKNOWN', never NULL. SKIPs until the transactions pipeline is
-        converted (see the playbook's worked example)."""
+        literal 'UNKNOWN', never NULL. Parity is value-for-value: FAIL if any
+        curated row has a NULL/blank channel, and the count of curated 'UNKNOWN'
+        rows must equal the count of blank channels in the source extract. SKIPs
+        until the transactions pipeline is converted (see the playbook's worked
+        example)."""
         if not self._target_exists("curated", "transactions"):
             self.results.append(
                 CheckResult(
@@ -191,19 +250,74 @@ class Reconciler:
                 )
             )
             return
-        nulls = (
-            self._read_target("curated", "transactions")
+        curated = self._read_target("curated", "transactions")
+        nulls = curated.where(
+            F.col("channel").isNull() | (F.trim(F.col("channel")) == "")
+        ).count()
+        # Source blanks (Ab Initio empty string) that the DML default maps to UNKNOWN.
+        src_blanks = (
+            dml.read_transactions(self.spark)
             .where(F.col("channel").isNull() | (F.trim(F.col("channel")) == ""))
             .count()
         )
-        ok = nulls == 0
+        curated_unknown = curated.where(F.col("channel") == "UNKNOWN").count()
+        ok = nulls == 0 and src_blanks == curated_unknown
         self.results.append(
             CheckResult(
                 "transactions_channel_parity",
                 "PASS" if ok else "FAIL",
-                f"{nulls} transaction(s) with NULL/blank channel "
-                f"(expected the DML default 'UNKNOWN')",
-                {"null_channels": nulls},
+                f"{nulls} curated row(s) with NULL/blank channel (expected 0); "
+                f"source blank channels = {src_blanks}, "
+                f"curated channel='UNKNOWN' = {curated_unknown} "
+                f"(DML default null('UNKNOWN'))",
+                {
+                    "null_channels": nulls,
+                    "source_blanks": src_blanks,
+                    "curated_unknown": curated_unknown,
+                },
+            )
+        )
+
+    def check_transactions_merchant_name_parity(self):
+        """The DML declares string(",", null("")) merchant_name — the default is
+        the empty string, NOT 'UNKNOWN'. A blank merchant_name must be reproduced
+        as "" and must never become NULL. Parity is value-for-value: FAIL if any
+        curated merchant_name is NULL, and the count of curated blank ("")
+        merchant_names must equal the source blank count."""
+        if not self._target_exists("curated", "transactions"):
+            self.results.append(
+                CheckResult(
+                    "transactions_merchant_name_parity",
+                    "SKIP",
+                    "curated.transactions not produced yet (live conversion target)",
+                )
+            )
+            return
+        curated = self._read_target("curated", "transactions").select(
+            F.col("merchant_info.merchant_name").alias("merchant_name")
+        )
+        nulls = curated.where(F.col("merchant_name").isNull()).count()
+        curated_blanks = curated.where(F.trim(F.col("merchant_name")) == "").count()
+        src_blanks = (
+            dml.read_transactions(self.spark)
+            .where(
+                F.col("merchant_name").isNull() | (F.trim(F.col("merchant_name")) == "")
+            )
+            .count()
+        )
+        ok = nulls == 0 and curated_blanks == src_blanks
+        self.results.append(
+            CheckResult(
+                "transactions_merchant_name_parity",
+                "PASS" if ok else "FAIL",
+                f"{nulls} curated merchant_name(s) NULL (expected 0); "
+                f"source blanks = {src_blanks}, curated blanks = {curated_blanks} "
+                f"(DML default null(''))",
+                {
+                    "null_merchant_names": nulls,
+                    "source_blanks": src_blanks,
+                    "curated_blanks": curated_blanks,
+                },
             )
         )
 
@@ -213,7 +327,10 @@ class Reconciler:
         self.check_orders_completeness()
         self.check_orders_control_total()
         self.check_orders_daily_parity()
+        self.check_transactions_completeness()
+        self.check_transactions_control_total()
         self.check_transactions_channel_parity()
+        self.check_transactions_merchant_name_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
 
