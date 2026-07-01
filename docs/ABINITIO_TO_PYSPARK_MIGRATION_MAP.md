@@ -57,7 +57,7 @@ DML lives in the source repo's `dml/`; the PySpark equivalents are in
 | Customer snapshot (`run_customer_cdc.ksh` step 1) | `src/jobs/stg_customers.py` | on `main` | input-file + reformat → staging |
 | Daily orders extract→staging (`run_daily_orders.ksh` ph.1-3) | `src/jobs/stg_orders.py` | on `main` | typed read + date parse |
 | Orders production rollover (`run_daily_orders.ksh` ph.4) | `src/jobs/mart_daily_orders.py` | on `main` | rollup → `groupBy().agg()` |
-| Transactions detail (`transaction_detail.dml`) | `src/jobs/stg_transactions.py` → `curated/transactions` | **live conversion** | flatten nested line items + DML defaults |
+| Transactions detail (`transaction_detail.dml`) | `src/jobs/curated_transactions.py` → `curated/transactions` | converted | nested merchant_info/line_items/refund_details + DML `null(...)` defaults |
 | Customer CDC (`cdc_processor.py`, `customer_cdc.pset`) | `src/jobs/cdc_customers.py` | **live conversion** | compare-by-key + row hash → Delta MERGE analog |
 
 "Live conversion" rows are the work Devin does during the demo via
