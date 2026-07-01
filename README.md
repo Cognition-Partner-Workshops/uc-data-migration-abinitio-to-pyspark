@@ -31,7 +31,9 @@ failed. Outputs land under `out/<NS>/` so multiple runs never collide.
 ├── data/raw/                     # legacy "before" flat-file extracts (durable)
 │   ├── customers.dat             #   comma-delimited (customer.dml + customer_address.dml)
 │   ├── orders.dat                #   pipe-delimited  (order extract)
-│   └── transactions.dat          #   pipe-delimited  (transaction_detail.dml)
+│   ├── transactions.dat          #   pipe-delimited  (transaction_detail.dml)
+│   ├── customer_snapshot_previous.dat  # pipe-delimited customer-master (CDC previous)
+│   └── customer_snapshot_current.dat   # pipe-delimited customer-master (CDC current)
 ├── seed/generate_source.py       # deterministic (re)generator for data/raw/  (make seed)
 ├── src/
 │   ├── common/
@@ -41,7 +43,8 @@ failed. Outputs land under `out/<NS>/` so multiple runs never collide.
 │   ├── jobs/                     # converted PySpark jobs (one per table)
 │   │   ├── stg_customers.py      #   customer snapshot graph
 │   │   ├── stg_orders.py         #   daily orders extract -> staging
-│   │   └── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   ├── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   └── cdc_customers.py      #   customer CDC (compare-by-key + row hash)
 │   └── run_pipeline.py           # orchestrator (PySpark analogue of the .ksh wrappers)
 ├── verify/reconcile.py           # source -> target reconciliation harness (CI gate)
 ├── tests/test_reconcile.py       # end-to-end pytest
@@ -66,6 +69,9 @@ extracts and the converted tables:
 | `orders_control_total` | mart `SUM(total_amount)` ties out to source `SUM(amount)` |
 | `orders_daily_parity` | per `order_date`, count + total match the source |
 | `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (live-conversion target) |
+| `customer_cdc_completeness` | one change record per new/removed key, no fan-out or double-count |
+| `customer_cdc_control_total` | `SUM(customer_id)` over the change set ties out to the recomputed changed keys |
+| `customer_cdc_parity` | INSERT/UPDATE/DELETE key sets match the legacy `"||"` MD5 row-hash classification |
 
 `verify/reconcile.py` exits non-zero on any FAIL, so it doubles as the CI gate.
 
@@ -90,12 +96,13 @@ auto-discovers and loads when working in this repo.
 
 ### What is converted on `main` vs live
 
-`main` carries the durable **before**-state — the customer and orders pipelines
-already converted, plus the reconciliation harness, the seed generator, the
-playbook source, and the Skill. The work Devin does **live** in the demo is the
-next wave — the transactions pipeline (flatten nested line items + reproduce the
-DML `null("UNKNOWN")` channel default) and the customer-CDC pipeline
-(compare-by-key + row hash). See
+`main` carries the durable **before**-state — the customer, orders and
+customer-CDC pipelines already converted (the CDC job reproduces the legacy
+compare-by-key + `"||"` MD5 row hash and is gated by per-class parity controls),
+plus the reconciliation harness, the seed generator, the playbook source, and the
+Skill. The work Devin does **live** in the demo is the next wave — the
+transactions pipeline (flatten nested line items + reproduce the DML
+`null("UNKNOWN")` channel default). See
 [`docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md`](docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md).
 
 ## Related Repositories

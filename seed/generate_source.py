@@ -106,6 +106,61 @@ SKUS = ["SKU-100", "SKU-200", "SKU-300", "SKU-400", "SKU-500"]
 # is null("UNKNOWN"), i.e. a blank channel is read as the literal "UNKNOWN".
 TXN_CHANNELS = ["WEB", "STORE", "APP", "WEB", ""]
 
+# Customer CDC pipeline inputs (run_customer_cdc.ksh / customer_cdc.pset).
+# The CDC graph compares two customer-master snapshots (PREVIOUS_SNAPSHOT_PATH vs
+# CURRENT_SNAPSHOT_PATH) by key and a row hash over HASH_COLUMNS to emit
+# INSERT/UPDATE/DELETE. The master record carries exactly the pset's HASH_COLUMNS
+# (customer_id,name,address,phone,email,status), pipe-delimited so the free-text
+# address may itself contain commas. These two files are the durable "before" for
+# the CDC reconciliation, the analogue of the snapshot landing area.
+CDC_STATUSES = ["ACTIVE", "ACTIVE", "INACTIVE", "PENDING"]
+# common keys whose CURRENT record differs from PREVIOUS -> CDC UPDATE class.
+CDC_UPDATED_STATUS = "SUSPENDED"
+
+
+def _cdc_master_record(i: int, *, updated: bool = False) -> str:
+    """One customer-master row (customer_id|name|address|phone|email|status).
+
+    Deterministic in ``i`` so the previous/current snapshots agree value-for-value
+    on unchanged keys. ``updated=True`` mutates a HASH_COLUMNS field (status) so
+    the row hash differs from the previous snapshot -> a CDC UPDATE.
+    """
+    cid = 1001 + i
+    first = FIRST_NAMES[i % len(FIRST_NAMES)]
+    last = LAST_NAMES[(i * 3) % len(LAST_NAMES)]
+    name = f"{first} {last}"
+    email = f"{first.lower()}.{last.lower()}{cid}@example.com"
+    city, state, zc = CITIES[i % len(CITIES)]
+    street = f"{100 + i} {STREETS[i % len(STREETS)]}"
+    address = f"{street}, {city}, {state} {zc}"
+    phone = f"555-{cid:04d}"
+    status = CDC_UPDATED_STATUS if updated else CDC_STATUSES[i % len(CDC_STATUSES)]
+    return f"{cid}|{name}|{address}|{phone}|{email}|{status}"
+
+
+def generate_customer_snapshot_previous(base: int) -> list[str]:
+    """Previous customer-master snapshot: keys 1001..(1001+base-6).
+
+    Omits the last 5 base keys (they appear only in current -> CDC INSERTs) and
+    keeps the first 3 keys that current omits (-> CDC DELETEs).
+    """
+    return [_cdc_master_record(i) for i in range(0, base - 5)]
+
+
+def generate_customer_snapshot_current(base: int) -> list[str]:
+    """Current customer-master snapshot: keys 1004..(1001+base-1).
+
+    Drops the first 3 base keys (-> DELETEs vs previous), adds the last 5 (->
+    INSERTs), and mutates a deterministic subset of the shared keys (cid % 7 == 0)
+    so their hash differs from previous (-> UPDATEs). Every other shared key is
+    byte-identical to previous and must be classified as unchanged.
+    """
+    rows = []
+    for i in range(3, base):
+        cid = 1001 + i
+        rows.append(_cdc_master_record(i, updated=(cid % 7 == 0)))
+    return rows
+
 
 def generate_customers(n: int) -> list[str]:
     rng = random.Random(101)
@@ -180,10 +235,14 @@ def main() -> None:
     customer_ids = [1001 + i for i in range(args.customers)]
     orders = generate_orders(args.orders, customer_ids)
     transactions = generate_transactions(args.transactions, customer_ids)
+    cdc_previous = generate_customer_snapshot_previous(args.customers)
+    cdc_current = generate_customer_snapshot_current(args.customers)
 
     write_file(RAW_DIR / "customers.dat", customers)
     write_file(RAW_DIR / "orders.dat", orders)
     write_file(RAW_DIR / "transactions.dat", transactions)
+    write_file(RAW_DIR / "customer_snapshot_previous.dat", cdc_previous)
+    write_file(RAW_DIR / "customer_snapshot_current.dat", cdc_current)
     print("Done. These files are the durable 'before' state for reconciliation.")
 
 

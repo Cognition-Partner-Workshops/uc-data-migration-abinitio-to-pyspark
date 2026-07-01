@@ -1,0 +1,45 @@
+1001|John Smith|100 Main St, New York, NY 10001|555-1001|john.smith1001@example.com|ACTIVE
+1002|Jane Williams|101 Oak Ave, Chicago, IL 60601|555-1002|jane.williams1002@example.com|ACTIVE
+1003|Bob Garcia|102 Pine Rd, Houston, TX 77001|555-1003|bob.garcia1003@example.com|INACTIVE
+1004|Alice Anderson|103 Elm St, Phoenix, AZ 85001|555-1004|alice.anderson1004@example.com|PENDING
+1005|Charlie Moore|104 Maple Dr, Philadelphia, PA 19101|555-1005|charlie.moore1005@example.com|ACTIVE
+1006|Diana Harris|105 Cedar Ln, San Antonio, TX 78201|555-1006|diana.harris1006@example.com|ACTIVE
+1007|Edward Young|106 Birch Way, San Diego, CA 92101|555-1007|edward.young1007@example.com|INACTIVE
+1008|Fiona Doe|107 Spruce Ct, Dallas, TX 75201|555-1008|fiona.doe1008@example.com|PENDING
+1009|George Brown|108 Walnut Pl, San Jose, CA 95101|555-1009|george.brown1009@example.com|ACTIVE
+1010|Helen Lee|109 Ash Blvd, Austin, TX 73301|555-1010|helen.lee1010@example.com|ACTIVE
+1011|Ivan Taylor|110 Main St, New York, NY 10001|555-1011|ivan.taylor1011@example.com|INACTIVE
+1012|Julia Jackson|111 Oak Ave, Chicago, IL 60601|555-1012|julia.jackson1012@example.com|PENDING
+1013|Kevin Clark|112 Pine Rd, Houston, TX 77001|555-1013|kevin.clark1013@example.com|ACTIVE
+1014|Laura King|113 Elm St, Phoenix, AZ 85001|555-1014|laura.king1014@example.com|ACTIVE
+1015|Mike Johnson|114 Maple Dr, Philadelphia, PA 19101|555-1015|mike.johnson1015@example.com|INACTIVE
+1016|Nina Martinez|115 Cedar Ln, San Antonio, TX 78201|555-1016|nina.martinez1016@example.com|PENDING
+1017|Oscar Wilson|116 Birch Way, San Diego, CA 92101|555-1017|oscar.wilson1017@example.com|ACTIVE
+1018|Paula Thomas|117 Spruce Ct, Dallas, TX 75201|555-1018|paula.thomas1018@example.com|ACTIVE
+1019|Quinn White|118 Walnut Pl, San Jose, CA 95101|555-1019|quinn.white1019@example.com|INACTIVE
+1020|Rachel Lewis|119 Ash Blvd, Austin, TX 73301|555-1020|rachel.lewis1020@example.com|PENDING
+1021|John Smith|120 Main St, New York, NY 10001|555-1021|john.smith1021@example.com|ACTIVE
+1022|Jane Williams|121 Oak Ave, Chicago, IL 60601|555-1022|jane.williams1022@example.com|ACTIVE
+1023|Bob Garcia|122 Pine Rd, Houston, TX 77001|555-1023|bob.garcia1023@example.com|INACTIVE
+1024|Alice Anderson|123 Elm St, Phoenix, AZ 85001|555-1024|alice.anderson1024@example.com|PENDING
+1025|Charlie Moore|124 Maple Dr, Philadelphia, PA 19101|555-1025|charlie.moore1025@example.com|ACTIVE
+1026|Diana Harris|125 Cedar Ln, San Antonio, TX 78201|555-1026|diana.harris1026@example.com|ACTIVE
+1027|Edward Young|126 Birch Way, San Diego, CA 92101|555-1027|edward.young1027@example.com|INACTIVE
+1028|Fiona Doe|127 Spruce Ct, Dallas, TX 75201|555-1028|fiona.doe1028@example.com|PENDING
+1029|George Brown|128 Walnut Pl, San Jose, CA 95101|555-1029|george.brown1029@example.com|ACTIVE
+1030|Helen Lee|129 Ash Blvd, Austin, TX 73301|555-1030|helen.lee1030@example.com|ACTIVE
+1031|Ivan Taylor|130 Main St, New York, NY 10001|555-1031|ivan.taylor1031@example.com|INACTIVE
+1032|Julia Jackson|131 Oak Ave, Chicago, IL 60601|555-1032|julia.jackson1032@example.com|PENDING
+1033|Kevin Clark|132 Pine Rd, Houston, TX 77001|555-1033|kevin.clark1033@example.com|ACTIVE
+1034|Laura King|133 Elm St, Phoenix, AZ 85001|555-1034|laura.king1034@example.com|ACTIVE
+1035|Mike Johnson|134 Maple Dr, Philadelphia, PA 19101|555-1035|mike.johnson1035@example.com|INACTIVE
+1036|Nina Martinez|135 Cedar Ln, San Antonio, TX 78201|555-1036|nina.martinez1036@example.com|PENDING
+1037|Oscar Wilson|136 Birch Way, San Diego, CA 92101|555-1037|oscar.wilson1037@example.com|ACTIVE
+1038|Paula Thomas|137 Spruce Ct, Dallas, TX 75201|555-1038|paula.thomas1038@example.com|ACTIVE
+1039|Quinn White|138 Walnut Pl, San Jose, CA 95101|555-1039|quinn.white1039@example.com|INACTIVE
+1040|Rachel Lewis|139 Ash Blvd, Austin, TX 73301|555-1040|rachel.lewis1040@example.com|PENDING
+1041|John Smith|140 Main St, New York, NY 10001|555-1041|john.smith1041@example.com|ACTIVE
+1042|Jane Williams|141 Oak Ave, Chicago, IL 60601|555-1042|jane.williams1042@example.com|ACTIVE
+1043|Bob Garcia|142 Pine Rd, Houston, TX 77001|555-1043|bob.garcia1043@example.com|INACTIVE
+1044|Alice Anderson|143 Elm St, Phoenix, AZ 85001|555-1044|alice.anderson1044@example.com|PENDING
+1045|Charlie Moore|144 Maple Dr, Philadelphia, PA 19101|555-1045|charlie.moore1045@example.com|ACTIVE
