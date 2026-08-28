@@ -83,6 +83,44 @@ TRANSACTION_SCHEMA = StructType(
 )
 
 
+# transaction_detail.dml declares nested sub-records that the flat extract carries
+# in flattened-header form: an embedded `merchant_info` record, a `line_items`
+# vector sized by `item_count`, and a conditional `refund_details` record emitted
+# only when `txn_type == 2`. The nesting is rebuilt in the conversion (see
+# src/jobs/curated_transactions.py) rather than parsed from the file.
+MERCHANT_INFO_STRUCT = StructType(
+    [
+        # string(",", null("")) merchant_name — the DML default is the empty
+        # string, so a blank merchant name is "" and never NULL.
+        StructField("merchant_name", StringType(), True),
+        StructField("merchant_category", StringType(), True),
+        StructField("amount", DecimalType(12, 2), True),
+    ]
+)
+
+LINE_ITEM_STRUCT = StructType(
+    [
+        StructField("sku", StringType(), True),
+        StructField("quantity", IntegerType(), True),
+        StructField("line_total", DecimalType(12, 2), True),
+    ]
+)
+
+REFUND_DETAILS_STRUCT = StructType(
+    [
+        StructField("original_txn_id", StringType(), True),
+        StructField("refund_reason", StringType(), True),
+    ]
+)
+
+# DML null(...) substitutions declared in transaction_detail.dml.
+CHANNEL_DML_DEFAULT = "UNKNOWN"  # string("\n", null("UNKNOWN")) channel
+MERCHANT_NAME_DML_DEFAULT = ""  # string(",", null("")) merchant_name
+
+# txn_type values the DML's conditional record keys off: 2 selects refund_details.
+TXN_TYPE_REFUND = 2
+
+
 def _read_delimited(
     spark: SparkSession, filename: str, schema: StructType, sep: str
 ) -> DataFrame:

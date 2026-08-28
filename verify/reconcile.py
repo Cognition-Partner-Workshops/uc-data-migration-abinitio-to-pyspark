@@ -15,12 +15,12 @@ coverage) between the raw source extracts and the converted PySpark tables.
 Each control reads the **source** straight from ``data/raw/`` (via the DML-derived
 readers) and the **target** from ``out/<namespace>/`` (the converted parquet
 tables), then compares them. A control returns FAIL on any divergence, SKIP when
-a prerequisite (e.g. the live-converted transactions curated table) has not been
-produced yet, and PASS otherwise. The script exits non-zero if any control FAILs,
+a prerequisite (e.g. a table from a pipeline that is not converted yet) has not
+been produced, and PASS otherwise. The script exits non-zero if any control FAILs,
 so it doubles as a CI / pre-merge gate.
 
-Controls present on ``main`` cover the customer and orders pipelines. Converting a
-new program (transactions, customer-CDC) adds its matching controls here — see
+Controls here cover the customer, orders, and transaction-detail pipelines.
+Converting a new program (customer-CDC) adds its matching controls here — see
 .workshop/playbooks/abinitio-to-pyspark-conversion.devin.md and
 .agents/skills/abinitio-to-pyspark-conversion/SKILL.md for the contract.
 
@@ -39,11 +39,11 @@ from pathlib import Path
 # Make 'src' importable when run as a script (python verify/reconcile.py).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pyspark.sql import functions as F  # noqa: E402
+from pyspark.sql import functions as F
 
-from src.common import dml  # noqa: E402
-from src.common.io import OUT_ROOT, layer_path  # noqa: E402
-from src.common.spark import build_spark  # noqa: E402
+from src.common import dml
+from src.common.io import OUT_ROOT, layer_path
+from src.common.spark import build_spark
 
 
 @dataclass
@@ -207,6 +207,181 @@ class Reconciler:
             )
         )
 
+    def _transactions_target(self):
+        """Curated transactions, or None if the pipeline has not produced it yet."""
+        if not self._target_exists("curated", "transactions"):
+            return None
+        return self._read_target("curated", "transactions")
+
+    def _skip_transactions(self, name: str) -> None:
+        self.results.append(
+            CheckResult(name, "SKIP", "curated.transactions not produced yet")
+        )
+
+    def check_transactions_completeness(self):
+        """Every source transaction must appear in the curated table exactly once
+        per line item — no row loss and no fan-out beyond the DML's line_items
+        vector. The extract carries one line-item triple per record, so the
+        curated row count must equal the source row count and the distinct
+        txn_id count must equal the source transaction population."""
+        target = self._transactions_target()
+        if target is None:
+            self._skip_transactions("transactions_completeness")
+            return
+        src = dml.read_transactions(self.spark)
+        expected_txns = src.count()
+        actual_rows = target.count()
+        actual_txns = target.select("txn_id").distinct().count()
+        ok = expected_txns == actual_rows == actual_txns
+        self.results.append(
+            CheckResult(
+                "transactions_completeness",
+                "PASS" if ok else "FAIL",
+                f"source transactions = {expected_txns}, curated rows = {actual_rows}, "
+                f"curated distinct txn_id = {actual_txns}",
+                {
+                    "expected": expected_txns,
+                    "rows": actual_rows,
+                    "distinct_txn_id": actual_txns,
+                },
+            )
+        )
+
+    def check_transactions_control_total(self):
+        """SUM(merchant_info.amount) over transactions (counted once per txn, not
+        once per exploded line item) must tie out to the source extract, and
+        SUM(line_total) over the flattened line items must tie out too."""
+        target = self._transactions_target()
+        if target is None:
+            self._skip_transactions("transactions_control_total")
+            return
+        src = dml.read_transactions(self.spark)
+        src_amount, src_line_total = src.agg(
+            F.sum("amount"), F.sum("line_total")
+        ).collect()[0]
+        tgt_amount = (
+            target.where(F.col("line_item_seq") == 1)
+            .agg(F.sum("merchant_info.amount"))
+            .collect()[0][0]
+        )
+        tgt_line_total = target.agg(F.sum("line_total")).collect()[0][0]
+        ok = src_amount == tgt_amount and src_line_total == tgt_line_total
+        self.results.append(
+            CheckResult(
+                "transactions_control_total",
+                "PASS" if ok else "FAIL",
+                f"SUM(amount): source {src_amount} vs curated {tgt_amount}; "
+                f"SUM(line_total): source {src_line_total} vs curated {tgt_line_total}",
+                {
+                    "src_amount": str(src_amount),
+                    "tgt_amount": str(tgt_amount),
+                    "src_line_total": str(src_line_total),
+                    "tgt_line_total": str(tgt_line_total),
+                },
+            )
+        )
+
+    def check_transactions_channel_domain_parity(self):
+        """Per-value parity for the channel domain: the curated count for every
+        channel value must equal the source count, with a blank source channel
+        counted as the DML default 'UNKNOWN'. A total that ties out can still hide
+        a single misclassified value, which is what this control catches."""
+        target = self._transactions_target()
+        if target is None:
+            self._skip_transactions("transactions_channel_domain_parity")
+            return
+        raw_channel = F.trim(F.col("channel"))
+        src = (
+            dml.read_transactions(self.spark)
+            .select(
+                F.when(
+                    raw_channel.isNull() | (raw_channel == ""),
+                    F.lit(dml.CHANNEL_DML_DEFAULT),
+                )
+                .otherwise(raw_channel)
+                .alias("channel")
+            )
+            .groupBy("channel")
+            .agg(F.count("*").alias("s_count"))
+        )
+        tgt = (
+            target.select("txn_id", "channel")
+            .distinct()
+            .groupBy("channel")
+            .agg(F.count("*").alias("t_count"))
+        )
+        joined = src.join(tgt, "channel", "full_outer")
+        mismatches = joined.where(
+            F.col("s_count").isNull()
+            | F.col("t_count").isNull()
+            | (F.col("s_count") != F.col("t_count"))
+        )
+        n_bad = mismatches.count()
+        detail = ", ".join(
+            f"{r['channel']}: source {r['s_count']} vs curated {r['t_count']}"
+            for r in mismatches.collect()
+        )
+        self.results.append(
+            CheckResult(
+                "transactions_channel_domain_parity",
+                "PASS" if n_bad == 0 else "FAIL",
+                f"{n_bad} channel value(s) diverge"
+                + (f" ({detail})" if detail else ""),
+                {"mismatched_channels": n_bad},
+            )
+        )
+
+    def check_transactions_merchant_default_parity(self):
+        """transaction_detail.dml declares string(",", null("")) merchant_name, so a
+        blank merchant name is the empty string — never NULL. Reproduce, don't
+        let Spark's CSV NULL coercion through."""
+        target = self._transactions_target()
+        if target is None:
+            self._skip_transactions("transactions_merchant_default_parity")
+            return
+        nulls = target.where(F.col("merchant_info.merchant_name").isNull()).count()
+        self.results.append(
+            CheckResult(
+                "transactions_merchant_default_parity",
+                "PASS" if nulls == 0 else "FAIL",
+                f"{nulls} row(s) with NULL merchant_name "
+                f"(expected the DML default '' for blanks)",
+                {"null_merchant_names": nulls},
+            )
+        )
+
+    def check_transactions_refund_parity(self):
+        """The DML's conditional record `if (txn_type == 2) ... end refund_details`
+        must be present for exactly the refund transactions and absent for all
+        others. Only the record's presence is reconcilable: the flat extract
+        carries no columns for its fields (flagged in the job)."""
+        target = self._transactions_target()
+        if target is None:
+            self._skip_transactions("transactions_refund_parity")
+            return
+        src = dml.read_transactions(self.spark)
+        expected_refunds = src.where(F.col("txn_type") == dml.TXN_TYPE_REFUND).count()
+        txn_level = target.select("txn_id", "txn_type", "refund_details").distinct()
+        actual_refunds = txn_level.where(F.col("refund_details").isNotNull()).count()
+        leaked = txn_level.where(
+            (F.col("txn_type") != dml.TXN_TYPE_REFUND)
+            & F.col("refund_details").isNotNull()
+        ).count()
+        ok = expected_refunds == actual_refunds and leaked == 0
+        self.results.append(
+            CheckResult(
+                "transactions_refund_parity",
+                "PASS" if ok else "FAIL",
+                f"source txn_type=2 = {expected_refunds}, curated with refund_details = "
+                f"{actual_refunds}, non-refunds carrying refund_details = {leaked}",
+                {
+                    "expected_refunds": expected_refunds,
+                    "actual_refunds": actual_refunds,
+                    "leaked": leaked,
+                },
+            )
+        )
+
     # ------------------------------------------------------------------- driver
     def run(self) -> bool:
         self.check_customers_completeness()
@@ -214,6 +389,11 @@ class Reconciler:
         self.check_orders_control_total()
         self.check_orders_daily_parity()
         self.check_transactions_channel_parity()
+        self.check_transactions_completeness()
+        self.check_transactions_control_total()
+        self.check_transactions_channel_domain_parity()
+        self.check_transactions_merchant_default_parity()
+        self.check_transactions_refund_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
 
@@ -225,8 +405,8 @@ class Reconciler:
             + self.ns
             + "/`) controls proving the",
             "converted PySpark tables reproduce the legacy Ab Initio extract's intent.",
-            "FAIL blocks the migration; SKIP means a prerequisite (e.g. the live-converted",
-            "transactions pipeline) has not been produced yet.",
+            "FAIL blocks the migration; SKIP means a prerequisite (a table from a",
+            "pipeline that is not converted yet) has not been produced.",
             "",
             "| Control | Result | Detail |",
             "|---|---|---|",
