@@ -41,7 +41,8 @@ failed. Outputs land under `out/<NS>/` so multiple runs never collide.
 │   ├── jobs/                     # converted PySpark jobs (one per table)
 │   │   ├── stg_customers.py      #   customer snapshot graph
 │   │   ├── stg_orders.py         #   daily orders extract -> staging
-│   │   └── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   ├── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   └── curated_transactions.py #  transaction detail -> curated (nested DML)
 │   └── run_pipeline.py           # orchestrator (PySpark analogue of the .ksh wrappers)
 ├── verify/reconcile.py           # source -> target reconciliation harness (CI gate)
 ├── tests/test_reconcile.py       # end-to-end pytest
@@ -65,7 +66,12 @@ extracts and the converted tables:
 | `orders_completeness` | staging orders = source orders (no loss / fan-out) |
 | `orders_control_total` | mart `SUM(total_amount)` ties out to source `SUM(amount)` |
 | `orders_daily_parity` | per `order_date`, count + total match the source |
-| `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (live-conversion target) |
+| `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default |
+| `transactions_completeness` | curated transactions = source transactions, one row per line item (no loss / fan-out) |
+| `transactions_control_total` | `SUM(amount)` and `SUM(line_total)` tie out to the source extract |
+| `transactions_channel_domain_parity` | per-channel counts match the source value-for-value |
+| `transactions_merchant_default_parity` | `merchant_name` applies the DML `null("")` default (never NULL) |
+| `transactions_refund_parity` | the conditional `refund_details` record is present for exactly the `txn_type = 2` rows |
 
 `verify/reconcile.py` exits non-zero on any FAIL, so it doubles as the CI gate.
 
@@ -93,9 +99,10 @@ auto-discovers and loads when working in this repo.
 `main` carries the durable **before**-state — the customer and orders pipelines
 already converted, plus the reconciliation harness, the seed generator, the
 playbook source, and the Skill. The work Devin does **live** in the demo is the
-next wave — the transactions pipeline (flatten nested line items + reproduce the
+next wave: the transactions pipeline (flatten nested line items + reproduce the
 DML `null("UNKNOWN")` channel default) and the customer-CDC pipeline
-(compare-by-key + row hash). See
+(compare-by-key + row hash). The transactions pipeline is now converted
+(`src/jobs/curated_transactions.py`); the customer-CDC pipeline is still open. See
 [`docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md`](docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md).
 
 ## Related Repositories
