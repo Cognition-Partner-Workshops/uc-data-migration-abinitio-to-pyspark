@@ -19,8 +19,8 @@ a prerequisite (e.g. the live-converted transactions curated table) has not been
 produced yet, and PASS otherwise. The script exits non-zero if any control FAILs,
 so it doubles as a CI / pre-merge gate.
 
-Controls present on ``main`` cover the customer and orders pipelines. Converting a
-new program (transactions, customer-CDC) adds its matching controls here — see
+Controls present on ``main`` cover the customer, orders and transactions pipelines.
+Converting a new program (customer-CDC) adds its matching controls here — see
 .workshop/playbooks/abinitio-to-pyspark-conversion.devin.md and
 .agents/skills/abinitio-to-pyspark-conversion/SKILL.md for the contract.
 
@@ -177,19 +177,165 @@ class Reconciler:
             )
         )
 
-    def check_transactions_channel_parity(self):
-        """Live-converted control: the curated transactions table must apply the
-        DML default channel = null("UNKNOWN") — a blank source channel becomes the
-        literal 'UNKNOWN', never NULL. SKIPs until the transactions pipeline is
-        converted (see the playbook's worked example)."""
-        if not self._target_exists("curated", "transactions"):
-            self.results.append(
-                CheckResult(
-                    "transactions_channel_parity",
-                    "SKIP",
-                    "curated.transactions not produced yet (live conversion target)",
-                )
+    def _skip_transactions(self, name: str) -> bool:
+        if self._target_exists("curated", "transactions"):
+            return False
+        self.results.append(
+            CheckResult(
+                name,
+                "SKIP",
+                "curated.transactions not produced yet (live conversion target)",
             )
+        )
+        return True
+
+    def _source_transactions(self):
+        """Source contract for the transactions extract: the flattened
+        transaction_detail.dml rows with the DML null(...) defaults applied
+        (blank channel -> 'UNKNOWN', blank merchant_name -> '')."""
+        src = dml.trimmed(dml.read_transactions(self.spark))
+        return src.withColumn(
+            "channel",
+            F.coalesce(F.nullif(F.col("channel"), F.lit("")), F.lit("UNKNOWN")),
+        ).withColumn("merchant_name", F.coalesce(F.col("merchant_name"), F.lit("")))
+
+    def check_transactions_completeness(self):
+        """Curated transactions must carry every source line item exactly once:
+        one curated row per flattened extract row and one distinct txn_id per
+        source transaction (no silent loss, no fan-out from the explode)."""
+        if self._skip_transactions("transactions_completeness"):
+            return
+        src = self._source_transactions()
+        tgt = self._read_target("curated", "transactions")
+        exp_rows, act_rows = src.count(), tgt.count()
+        exp_txns = src.select("txn_id").distinct().count()
+        act_txns = tgt.select("txn_id").distinct().count()
+        ok = exp_rows == act_rows and exp_txns == act_txns
+        self.results.append(
+            CheckResult(
+                "transactions_completeness",
+                "PASS" if ok else "FAIL",
+                f"source line items = {exp_rows}, curated rows = {act_rows}; "
+                f"source txns = {exp_txns}, curated distinct txn_id = {act_txns}",
+                {
+                    "expected_rows": exp_rows,
+                    "actual_rows": act_rows,
+                    "expected_txns": exp_txns,
+                    "actual_txns": act_txns,
+                },
+            )
+        )
+
+    def check_transactions_control_total(self):
+        """SUM(merchant_info.amount) per transaction and SUM(line_items.line_total)
+        per line item in the curated table must tie out to the source extract."""
+        if self._skip_transactions("transactions_control_total"):
+            return
+        src = self._source_transactions()
+        tgt = self._read_target("curated", "transactions")
+        src_amount = src.dropDuplicates(["txn_id"]).agg(F.sum("amount")).collect()[0][0]
+        tgt_amount = tgt.dropDuplicates(["txn_id"]).agg(F.sum("amount")).collect()[0][0]
+        src_lines = src.agg(F.sum("line_total")).collect()[0][0]
+        tgt_lines = tgt.agg(F.sum("line_total")).collect()[0][0]
+        ok = src_amount == tgt_amount and src_lines == tgt_lines
+        self.results.append(
+            CheckResult(
+                "transactions_control_total",
+                "PASS" if ok else "FAIL",
+                f"SUM(amount) source = {src_amount}, curated = {tgt_amount}; "
+                f"SUM(line_total) source = {src_lines}, curated = {tgt_lines}",
+                {
+                    "expected_amount": str(src_amount),
+                    "actual_amount": str(tgt_amount),
+                    "expected_line_total": str(src_lines),
+                    "actual_line_total": str(tgt_lines),
+                },
+            )
+        )
+
+    def check_transactions_row_parity(self):
+        """Per (txn_id, sku) line item, every mapped field must match the source
+        value-for-value: timestamp parse, ids, txn_type, merchant_info, amounts,
+        quantities and the DML-defaulted merchant_name / channel."""
+        if self._skip_transactions("transactions_row_parity"):
+            return
+        cols = [
+            "txn_timestamp",
+            "customer_id",
+            "txn_type",
+            "merchant_name",
+            "merchant_category",
+            "amount",
+            "item_count",
+            "quantity",
+            "line_total",
+            "channel",
+        ]
+        src = self._source_transactions().select(
+            "txn_id", "sku", *[F.col(c).alias(f"s_{c}") for c in cols]
+        )
+        tgt = self._read_target("curated", "transactions").select(
+            "txn_id",
+            "sku",
+            F.date_format("txn_timestamp", "yyyy-MM-dd HH:mm:ss").alias(
+                "txn_timestamp"
+            ),
+            *[c for c in cols if c != "txn_timestamp"],
+        )
+        joined = src.join(tgt, ["txn_id", "sku"], "full_outer")
+        diverged = F.lit(False)
+        for c in cols:
+            diverged = diverged | ~F.col(f"s_{c}").eqNullSafe(F.col(c))
+        n_bad = joined.where(diverged).count()
+        ok = n_bad == 0
+        self.results.append(
+            CheckResult(
+                "transactions_row_parity",
+                "PASS" if ok else "FAIL",
+                f"{n_bad} line item(s) diverge from the source extract "
+                f"across {len(cols)} mapped fields",
+                {"mismatched_rows": n_bad},
+            )
+        )
+
+    def check_transactions_channel_domain_parity(self):
+        """Per channel value (WEB/STORE/APP/UNKNOWN), the curated count must equal
+        the source count with the DML null("UNKNOWN") default applied — parity
+        per class, not just "no NULLs"."""
+        if self._skip_transactions("transactions_channel_domain_parity"):
+            return
+        src = (
+            self._source_transactions()
+            .groupBy("channel")
+            .agg(F.count("*").alias("s_count"))
+        )
+        tgt = (
+            self._read_target("curated", "transactions")
+            .groupBy("channel")
+            .agg(F.count("*").alias("t_count"))
+        )
+        joined = src.join(tgt, "channel", "full_outer")
+        bad = joined.where(~F.col("s_count").eqNullSafe(F.col("t_count"))).collect()
+        ok = len(bad) == 0
+        domain = {
+            r["channel"]: (r["s_count"], r["t_count"])
+            for r in joined.orderBy("channel").collect()
+        }
+        self.results.append(
+            CheckResult(
+                "transactions_channel_domain_parity",
+                "PASS" if ok else "FAIL",
+                f"{len(bad)} channel value(s) diverge; source/curated counts = "
+                + ", ".join(f"{k}: {s}/{t}" for k, (s, t) in domain.items()),
+                {"mismatched_channels": len(bad), "domain": domain},
+            )
+        )
+
+    def check_transactions_channel_parity(self):
+        """The curated transactions table must apply the DML default
+        channel = null("UNKNOWN") — a blank source channel becomes the literal
+        'UNKNOWN', never NULL (see the playbook's worked example)."""
+        if self._skip_transactions("transactions_channel_parity"):
             return
         nulls = (
             self._read_target("curated", "transactions")
@@ -213,6 +359,10 @@ class Reconciler:
         self.check_orders_completeness()
         self.check_orders_control_total()
         self.check_orders_daily_parity()
+        self.check_transactions_completeness()
+        self.check_transactions_control_total()
+        self.check_transactions_row_parity()
+        self.check_transactions_channel_domain_parity()
         self.check_transactions_channel_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
