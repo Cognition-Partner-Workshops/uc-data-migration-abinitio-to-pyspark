@@ -65,7 +65,11 @@ extracts and the converted tables:
 | `orders_completeness` | staging orders = source orders (no loss / fan-out) |
 | `orders_control_total` | mart `SUM(total_amount)` ties out to source `SUM(amount)` |
 | `orders_daily_parity` | per `order_date`, count + total match the source |
-| `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (live-conversion target) |
+| `transactions_completeness` | curated rows = source line items; distinct `txn_id` = source transactions |
+| `transactions_control_total` | `SUM(amount)` (once per txn) and `SUM(line_total)` tie out to the source |
+| `transactions_row_parity` | per (`txn_id`, `sku`), every mapped field matches the source value-for-value |
+| `transactions_channel_domain_parity` | per-channel counts match the source after the DML `null("UNKNOWN")` default |
+| `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (no NULL/blank) |
 
 `verify/reconcile.py` exits non-zero on any FAIL, so it doubles as the CI gate.
 
@@ -92,10 +96,10 @@ auto-discovers and loads when working in this repo.
 
 `main` carries the durable **before**-state — the customer and orders pipelines
 already converted, plus the reconciliation harness, the seed generator, the
-playbook source, and the Skill. The work Devin does **live** in the demo is the
-next wave — the transactions pipeline (flatten nested line items + reproduce the
-DML `null("UNKNOWN")` channel default) and the customer-CDC pipeline
-(compare-by-key + row hash). See
+playbook source, and the Skill. The transactions pipeline
+(`src/jobs/curated_transactions.py`: flatten nested line items + reproduce the
+DML `null("UNKNOWN")` channel default) was converted live via the playbook; the
+remaining wave is the customer-CDC pipeline (compare-by-key + row hash). See
 [`docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md`](docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md).
 
 ## Related Repositories
