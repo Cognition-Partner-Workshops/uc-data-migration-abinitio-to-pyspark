@@ -98,6 +98,13 @@ DML `null("UNKNOWN")` channel default) and the customer-CDC pipeline
 (compare-by-key + row hash). See
 [`docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md`](docs/ABINITIO_TO_PYSPARK_MIGRATION_MAP.md).
 
+## Conversion launcher (Streamlit)
+
+`streamlit_app/` is a small UI that lets you upload Ab Initio `.mp`/`.ksh`/`.dml`/`.pset` files
+and starts a Devin session (via the Devin Sessions API) to convert them here, following
+the playbook and Skill above. It then tracks the session until the PR is open. See
+[`streamlit_app/README.md`](streamlit_app/README.md).
+
 ## Related Repositories
 
 | Repo | Purpose |

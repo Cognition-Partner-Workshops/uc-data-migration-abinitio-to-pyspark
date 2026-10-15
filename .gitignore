@@ -22,3 +22,7 @@ Thumbs.db
 
 # Reconciliation reports
 reconciliation_report.md
+
+# Streamlit launcher webhook callbacks / local secrets
+streamlit_app/.webhook_events/
+.streamlit/secrets.toml
