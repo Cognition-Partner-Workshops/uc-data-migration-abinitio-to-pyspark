@@ -1,5 +1,6 @@
 import json
 import urllib.request
+from pathlib import Path
 
 import pytest
 from stub_devin_api import VALID_KEY, serve
@@ -41,7 +42,7 @@ def test_prompt_references_playbook_skills_and_files():
 def test_prompt_webhook_section():
     prompt = dc.build_prompt(_request(webhook_url="https://hook.example.com/cb"))
     assert "https://hook.example.com/cb" in prompt
-    assert "$WEBHOOK_SECRET" in prompt
+    assert "$WEBHOOK_TOKEN" in prompt
 
 
 def test_decode_upload_truncates_and_handles_latin1():
@@ -87,9 +88,41 @@ def test_retries_server_errors_then_succeeds(stub, monkeypatch):
     monkeypatch.setattr(dc.time, "sleep", lambda _: None)
     state.fail_next = [503, 502]
     created = dc.DevinClient(VALID_KEY, base_url=base, max_retries=2).create_session(
-        "hi"
+        "hi", idempotent=True
     )
     assert created["session_id"].startswith("devin-")
+
+
+def test_non_idempotent_create_is_not_retried_on_5xx(stub, monkeypatch):
+    base, state = stub
+    monkeypatch.setattr(dc.time, "sleep", lambda _: None)
+    state.fail_next = [503, 503]
+    with pytest.raises(dc.DevinAPIError, match="may still have been applied"):
+        dc.DevinClient(VALID_KEY, base_url=base, max_retries=2).create_session("hi")
+    assert state.fail_next == [503]  # exactly one attempt
+
+
+def test_lost_create_response_does_not_duplicate_sessions(stub):
+    base, state = stub
+    client = dc.DevinClient(VALID_KEY, base_url=base, timeout=0.3, max_retries=2)
+
+    state.create_delays = [1.0]
+    with pytest.raises(dc.DevinAPIError, match="may still have been applied"):
+        client.create_session("plain")
+    assert len(state.sessions) == 1  # committed once, never retried
+
+    state.create_delays = [1.0]
+    created = client.create_session("idem", idempotent=True)
+    assert created["is_new_session"] is False  # retry returned the first session
+    assert len(state.sessions) == 2
+
+
+def test_rate_limited_create_is_retried(stub, monkeypatch):
+    base, state = stub
+    monkeypatch.setattr(dc.time, "sleep", lambda _: None)
+    state.fail_next = [429]
+    created = dc.DevinClient(VALID_KEY, base_url=base).create_session("hi")
+    assert created["is_new_session"] is True
 
 
 def test_gives_up_after_max_retries(stub, monkeypatch):
@@ -97,7 +130,9 @@ def test_gives_up_after_max_retries(stub, monkeypatch):
     monkeypatch.setattr(dc.time, "sleep", lambda _: None)
     state.fail_next = [500, 500, 500]
     with pytest.raises(dc.DevinAPIError) as exc:
-        dc.DevinClient(VALID_KEY, base_url=base, max_retries=2).create_session("hi")
+        dc.DevinClient(VALID_KEY, base_url=base, max_retries=2).create_session(
+            "hi", idempotent=True
+        )
     assert exc.value.retryable and exc.value.status_code == 500
 
 
@@ -115,6 +150,13 @@ def test_missing_key():
         dc.DevinClient("")
 
 
+def _post(url, body, token):
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), headers={"X-Webhook-Token": token}
+    )
+    return urllib.request.urlopen(req)
+
+
 def test_webhook_receiver_roundtrip(tmp_path):
     from http.server import ThreadingHTTPServer
     from threading import Thread
@@ -124,23 +166,33 @@ def test_webhook_receiver_roundtrip(tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), wr.make_handler("s3cret", tmp_path))
     Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    body = json.dumps(
-        {"session_id": "devin-abc", "pr_url": "https://x/pull/2"}
-    ).encode()
+    cid_a, token_a = wr.new_callback_token("s3cret")
+    cid_b, _ = wr.new_callback_token("s3cret")
+    body = {"session_id": "devin-abc", "pr_url": "https://x/pull/2"}
+    try:
+        for bad in ("nope", "s3cret", f"{cid_b}.{token_a.split('.')[1]}"):
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _post(url, body, bad)
+            assert exc.value.code == 401
 
-    bad = urllib.request.Request(url, data=body, headers={"X-Webhook-Secret": "nope"})
-    with pytest.raises(urllib.error.HTTPError) as exc:
-        urllib.request.urlopen(bad)
-    assert exc.value.code == 401
+        assert _post(url, body, token_a).status == 200
+        assert read_event(tmp_path, cid_a)["pr_url"] == "https://x/pull/2"
+        assert read_event(tmp_path, cid_b) is None
 
-    ok = urllib.request.Request(url, data=body, headers={"X-Webhook-Secret": "s3cret"})
-    assert urllib.request.urlopen(ok).status == 200
-    assert read_event(tmp_path, "devin-abc")["pr_url"] == "https://x/pull/2"
+        # a session's body cannot redirect the write to another session's event
+        _post(url, {"session_id": cid_b, "callback_id": cid_b}, token_a)
+        assert read_event(tmp_path, cid_b) is None
+        assert read_event(tmp_path, cid_a)["callback_id"] == cid_a
+        assert not list(tmp_path.glob(".tmp-*"))
+    finally:
+        server.shutdown()
 
-    traversal = json.dumps({"session_id": "../../etc"}).encode()
-    req = urllib.request.Request(
-        url, data=traversal, headers={"X-Webhook-Secret": "s3cret"}
-    )
-    with pytest.raises(urllib.error.HTTPError):
-        urllib.request.urlopen(req)
-    server.shutdown()
+
+def test_verify_token_rejects_other_secret():
+    import webhook_receiver as wr
+
+    cid, token = wr.new_callback_token("one")
+    assert wr.verify_token("one", token) == cid
+    assert wr.verify_token("two", token) is None
+    assert wr.verify_token("", token) is None
+    assert wr.event_path(Path("/tmp"), "../../etc") is None

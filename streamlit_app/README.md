@@ -55,11 +55,14 @@ You can do any of these (listed by precedence):
    ```toml
    DEVIN_API_KEY = "cog_..."
    # DEVIN_API_BASE_URL = "https://api.devin.ai/v1"
+   # DEVIN_APP_URL = "https://app.devin.ai"
    ```
 3. Paste it into the **API key** field in the sidebar. It stays in the browser session only.
 
 If your Devin deployment uses a different API host, set **API base URL** in the sidebar
-(or `DEVIN_API_BASE_URL`).
+(or `DEVIN_API_BASE_URL`). Also set **Devin web app URL** (or `DEVIN_APP_URL`) to the
+host you open sessions on. The app uses it for session links when the API response
+doesn't include a URL.
 
 ## Using the app
 
@@ -81,9 +84,16 @@ If your Devin deployment uses a different API host, set **API base URL** in the 
 
 - 401/403/404/422 produce a clear message: bad key, missing permission, unknown
   session, or validation details from the API.
-- Timeouts, connection errors, 429 and 5xx responses are retried with backoff
-  (and `Retry-After` is respected). If polling fails 5 times in a row, it pauses
+- Status polls (`GET`) retry timeouts, connection errors, 429 and 5xx responses with
+  backoff, and respect `Retry-After`. If polling fails 5 times in a row, it pauses
   and shows a **Refresh now** button.
+- Session creation sends `idempotent=true` by default (**Advanced → Idempotent create**),
+  so a retried or repeated launch of the same request gets back the existing session
+  instead of a duplicate. The app tells you when that happens. With it off, a create
+  that may have reached the server (read timeout, dropped connection, 5xx) is **not**
+  retried. You get an error telling you to check your sessions list, and you can then
+  attach to the session with **Track an existing session**. Messages sent to a session
+  follow the same rule.
 
 ## Optional: webhook instead of polling
 
@@ -91,11 +101,16 @@ The v1 Sessions API has no push notifications for session status, so the webhook
 mode works the other way around. When you pick **Update mode → Webhook**:
 
 - The prompt asks Devin to `POST` its final structured output (plus `session_id`)
-  to your **Webhook URL** with the header `X-Webhook-Secret: $WEBHOOK_SECRET`.
-- The secret goes to the session as a sensitive `session_secrets` entry
-  (`WEBHOOK_SECRET`). It never appears in the prompt text.
+  to your **Webhook URL** with the header `X-Webhook-Token: $WEBHOOK_TOKEN`.
+- `WEBHOOK_TOKEN` is unique to each session: `<callback_id>.<HMAC-SHA256(WEBHOOK_SECRET, callback_id)>`.
+  It goes to the session as a sensitive `session_secrets` entry and never appears in
+  the prompt text. The sidebar **Webhook secret** (`WEBHOOK_SECRET`) is shared only by
+  the app and the receiver; it is never sent to Devin.
+- The receiver stores each callback under the `callback_id` from the verified token, not
+  under the `session_id` in the body. One session can't overwrite another session's result.
 - The app calls the API once for the session link. After that it only watches the
   receiver's events directory, and does a final API refresh when the callback arrives.
+  The callback's structured output and final status are shown even if that refresh fails.
 
 To run the receiver:
 
@@ -105,9 +120,9 @@ WEBHOOK_SECRET='<same value as the sidebar "Webhook secret">' \
 ```
 
 Expose it over HTTPS at a URL that Devin's machine can reach (reverse proxy, ingress or
-tunnel), and enter that URL in the sidebar. The receiver checks the secret
-(constant-time compare), caps the body at 1 MB, and writes `<session_id>.json` into
-the events dir. The Streamlit app must be able to read that dir (same host or a shared volume).
+tunnel), and enter that URL in the sidebar. The receiver checks the token
+(constant-time HMAC compare), caps the body at 1 MB, and writes `<callback_id>.json`
+into the events dir with an atomic replace, so readers never see a half-written file. The Streamlit app must be able to read that dir (same host or a shared volume).
 If you'd rather drive this from Devin itself, a Devin
 [Automation](https://docs.devin.ai/product-guides/automations) with a webhook trigger
 is the native option for *incoming* events.

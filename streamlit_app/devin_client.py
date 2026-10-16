@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 DEFAULT_BASE_URL = "https://api.devin.ai/v1"
+DEFAULT_APP_URL = "https://app.devin.ai"
 DEFAULT_REPO = "Cognition-Partner-Workshops/uc-data-migration-abinitio-to-pyspark"
 PLAYBOOK_PATH = ".workshop/playbooks/abinitio-to-pyspark-conversion.devin.md"
 SKILLS_PATH = ".agents/skills/"
@@ -137,8 +138,8 @@ def build_prompt(req: ConversionRequest) -> str:
             "",
             "## Completion callback",
             f"When you are done (or blocked), POST the final structured output as JSON to "
-            f"`{req.webhook_url}` with header `X-Webhook-Secret: $WEBHOOK_SECRET` "
-            "(the secret is provided to this session as the `WEBHOOK_SECRET` environment "
+            f"`{req.webhook_url}` with header `X-Webhook-Token: $WEBHOOK_TOKEN` "
+            "(the token is provided to this session as the `WEBHOOK_TOKEN` environment "
             "variable). Include your `session_id` in the body.",
         ]
 
@@ -174,6 +175,15 @@ def _error_detail(resp: requests.Response) -> str:
     return str(detail)[:500]
 
 
+def _maybe_applied(err: DevinAPIError) -> DevinAPIError:
+    err.message += (
+        " The request may still have been applied (e.g. the session may exist): "
+        "check your Devin sessions list before retrying."
+    )
+    err.args = (err.message,)
+    return err
+
+
 class DevinClient:
     def __init__(
         self,
@@ -193,20 +203,38 @@ class DevinClient:
             {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         )
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _request(
+        self, method: str, path: str, *, retry_unsafe: bool = True, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Send a request, retrying transient failures.
+
+        ``retry_unsafe=False`` is for non-idempotent writes: only failures that prove
+        the server never acted on the request (connect timeout, 429) are retried;
+        anything that may have reached the server is raised with a hint instead.
+        """
         url = f"{self.base_url}{path}"
         attempt = 0
         while True:
             try:
                 resp = self.http.request(method, url, timeout=self.timeout, **kwargs)
+            except requests.ConnectTimeout as exc:
+                err = DevinAPIError(
+                    f"Could not connect to {self.base_url} (timed out).", retryable=True
+                )
+                if attempt >= self.max_retries:
+                    raise err from exc
             except requests.Timeout as exc:
                 err = DevinAPIError(f"Request to {url} timed out.", retryable=True)
+                if not retry_unsafe:
+                    raise _maybe_applied(err) from exc
                 if attempt >= self.max_retries:
                     raise err from exc
             except requests.ConnectionError as exc:
                 err = DevinAPIError(
                     f"Could not connect to {self.base_url}.", retryable=True
                 )
+                if not retry_unsafe:
+                    raise _maybe_applied(err) from exc
                 if attempt >= self.max_retries:
                     raise err from exc
             except requests.RequestException as exc:
@@ -220,6 +248,8 @@ class DevinClient:
                             "Devin API returned a non-JSON response."
                         ) from exc
                 err = self._http_error(resp)
+                if err.retryable and not retry_unsafe and resp.status_code != 429:
+                    raise _maybe_applied(err)
                 if not err.retryable or attempt >= self.max_retries:
                     raise err
                 retry_after = resp.headers.get("Retry-After", "")
@@ -281,14 +311,17 @@ class DevinClient:
             "structured_output_schema": structured_output_schema,
         }
         payload.update({k: v for k, v in optional.items() if v})
-        return self._request("POST", "/sessions", json=payload)
+        return self._request("POST", "/sessions", json=payload, retry_unsafe=idempotent)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         return self._request("GET", f"/sessions/{session_id}")
 
     def send_message(self, session_id: str, message: str) -> dict[str, Any]:
         return self._request(
-            "POST", f"/sessions/{session_id}/message", json={"message": message}
+            "POST",
+            f"/sessions/{session_id}/message",
+            json={"message": message},
+            retry_unsafe=False,
         )
 
 

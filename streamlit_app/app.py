@@ -14,6 +14,7 @@ import streamlit as st
 
 from devin_client import (
     ALLOWED_EXTENSIONS,
+    DEFAULT_APP_URL,
     DEFAULT_BASE_URL,
     DEFAULT_REPO,
     ConversionRequest,
@@ -26,7 +27,7 @@ from devin_client import (
     pr_url,
     session_state,
 )
-from webhook_receiver import DEFAULT_EVENTS_DIR, read_event
+from webhook_receiver import DEFAULT_EVENTS_DIR, new_callback_token, read_event
 
 MAX_CONSECUTIVE_POLL_ERRORS = 5
 STATUS_ICONS = {
@@ -52,7 +53,7 @@ def _secret(name: str) -> str:
 
 def _state():
     ss = st.session_state
-    ss.setdefault("sessions", {})  # session_id -> {url, title, created_at, mode}
+    ss.setdefault("sessions", {})  # session_id -> {url, title, mode, callback_id}
     ss.setdefault("details", {})  # session_id -> last GET /sessions/{id} payload
     ss.setdefault("poll_errors", {})  # session_id -> consecutive error count
     ss.setdefault("last_error", {})  # session_id -> last error message
@@ -76,6 +77,16 @@ with st.sidebar:
     base_url = st.text_input(
         "API base URL", value=_secret("DEVIN_API_BASE_URL") or DEFAULT_BASE_URL
     ).strip()
+    app_url = (
+        st.text_input(
+            "Devin web app URL",
+            value=_secret("DEVIN_APP_URL") or DEFAULT_APP_URL,
+            help="Used for session links when the API response has no URL "
+            "(set this for enterprise deployments).",
+        )
+        .strip()
+        .rstrip("/")
+    )
 
     st.header("Target")
     repo = st.text_input("Target repo (owner/name)", value=DEFAULT_REPO).strip()
@@ -86,7 +97,7 @@ with st.sidebar:
     ).strip()
 
     st.header("Updates")
-    mode = st.radio("Update mode", ["Poll", "Webhook"], horizontal=True)
+    mode = st.radio("Update mode", ["Poll", "Webhook"], horizontal=True, key="mode")
     poll_interval = st.slider(
         "Poll interval (seconds)", min_value=5, max_value=300, value=20, step=5
     )
@@ -102,11 +113,13 @@ with st.sidebar:
             "Webhook secret",
             key="webhook_secret",
             type="password",
-            help="Passed to the session as the WEBHOOK_SECRET session secret; start the "
-            "receiver with the same value.",
+            help="Start the receiver with WEBHOOK_SECRET set to this value. It is never "
+            "sent to Devin: each session gets its own derived WEBHOOK_TOKEN.",
         )
         events_dir = Path(
-            st.text_input("Receiver events dir", value=str(DEFAULT_EVENTS_DIR))
+            st.text_input(
+                "Receiver events dir", value=str(DEFAULT_EVENTS_DIR), key="events_dir"
+            )
         )
     else:
         events_dir = DEFAULT_EVENTS_DIR
@@ -117,6 +130,12 @@ with st.sidebar:
         )
         tags_raw = st.text_input("Tags (comma-separated)", value="abinitio-to-pyspark")
         unlisted = st.checkbox("Unlisted session", value=False)
+        idempotent = st.checkbox(
+            "Idempotent create",
+            value=True,
+            help="Sends idempotent=true so a retried or repeated launch of the same "
+            "request reuses the existing session instead of starting a duplicate.",
+        )
         max_chars = st.number_input(
             "Max characters embedded per file",
             min_value=1_000,
@@ -197,9 +216,11 @@ if st.button("Start Devin session", type="primary", disabled=bool(problems)):
     if client:
         title = f"Ab Initio → PySpark: {graph_name.strip() or sources[0].name}"
         session_secrets = None
+        callback_id = None
         if mode == "Webhook":
+            callback_id, token = new_callback_token(ss.webhook_secret)
             session_secrets = [
-                {"key": "WEBHOOK_SECRET", "value": ss.webhook_secret, "sensitive": True}
+                {"key": "WEBHOOK_TOKEN", "value": token, "sensitive": True}
             ]
         try:
             with st.spinner("Creating session..."):
@@ -210,20 +231,32 @@ if st.button("Start Devin session", type="primary", disabled=bool(problems)):
                     tags=tags or None,
                     max_acu_limit=int(max_acu) or None,
                     unlisted=unlisted,
+                    idempotent=idempotent,
                     session_secrets=session_secrets,
                 )
         except DevinAPIError as exc:
             st.error(f"Could not start the session. {exc.message}")
         else:
             sid = created["session_id"]
-            ss.sessions[sid] = {
-                "url": created.get("url"),
-                "title": title,
-                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                "mode": mode,
-            }
+            reused = created.get("is_new_session") is False and sid in ss.sessions
+            if not reused:
+                ss.sessions[sid] = {
+                    "url": created.get("url"),
+                    "title": title,
+                    "created_at": datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M UTC"
+                    ),
+                    "mode": mode,
+                    "callback_id": callback_id,
+                }
             ss.active = sid
-            st.success(f"Session started: {created.get('url')}")
+            if created.get("is_new_session") is False:
+                st.info(
+                    f"Devin returned an existing session for this identical request: "
+                    f"{created.get('url')}"
+                )
+            else:
+                st.success(f"Session started: {created.get('url')}")
 elif problems:
     st.caption("To start: " + "; ".join(problems) + ".")
 
@@ -235,6 +268,11 @@ with st.expander("Track an existing session"):
 
 
 # ---------------------------------------------------------------- status panel
+def _event(sid: str) -> dict | None:
+    callback_id = ss.sessions.get(sid, {}).get("callback_id")
+    return read_event(events_dir, callback_id) if callback_id else None
+
+
 def _refresh(sid: str) -> None:
     client = _client()
     if not client:
@@ -254,11 +292,16 @@ def _render(sid: str) -> None:
     state = session_state(details) if details else "pending"
     url = meta.get("url") or details.get("url")
     if not url:
-        url = f"https://app.devin.ai/sessions/{sid.removeprefix('devin-')}"
+        url = f"{app_url}/sessions/{sid.removeprefix('devin-')}"
+    event = _event(sid)
+    label = state
+    if event and not is_terminal(details):
+        # the API snapshot may be stale; surface the callback's final status
+        label = f"{state} · callback: {event.get('status') or 'received'}"
 
     st.subheader(meta.get("title") or sid)
     c1, c2 = st.columns([1, 2])
-    c1.markdown(f"{STATUS_ICONS.get(state, ':material/help:')} **{state}**")
+    c1.markdown(f"{STATUS_ICONS.get(state, ':material/help:')} **{label}**")
     c2.link_button("Open session in Devin", url)
     if details.get("updated_at"):
         st.caption(f"Last updated {details['updated_at']}")
@@ -269,7 +312,6 @@ def _render(sid: str) -> None:
             f"{ss.last_error[sid]}"
         )
 
-    event = read_event(events_dir, sid) if meta.get("mode") == "Webhook" else None
     if event:
         st.info(f"Webhook callback received {event.get('received_at', '')}")
 
@@ -277,7 +319,7 @@ def _render(sid: str) -> None:
     if link:
         st.markdown(f"**Pull request:** [{link}]({link})")
 
-    structured = details.get("structured_output") or (event if event else None)
+    structured = event or details.get("structured_output")
     if structured:
         st.markdown("**Structured output**")
         st.json(structured)
@@ -335,7 +377,7 @@ if ss.sessions:
     def status_panel() -> None:
         if auto and (not webhook_mode or sid not in ss.details):
             _refresh(sid)
-        elif auto and webhook_mode and read_event(events_dir, sid):
+        elif auto and webhook_mode and _event(sid):
             _refresh(sid)
         _render(sid)
         now_done = bool(ss.details.get(sid)) and is_terminal(ss.details[sid])

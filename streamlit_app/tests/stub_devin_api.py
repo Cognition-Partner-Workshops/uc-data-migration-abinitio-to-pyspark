@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VALID_KEY = "cog_test"
@@ -20,6 +21,8 @@ class StubState:
         self.sessions: dict[str, dict] = {}
         self.created_payloads: list[dict] = []
         self.fail_next: list[int] = []
+        self.create_delays: list[float] = []  # sleep after committing, before replying
+        self.idempotency: dict[str, str] = {}  # prompt -> session_id
         self.lock = threading.Lock()
 
 
@@ -69,15 +72,26 @@ def make_handler(state: StubState, accept_any_key: bool = False):
                     )
                     return
                 with state.lock:
-                    state.created_payloads.append(body)
-                    sid = f"devin-stub{len(state.sessions) + 1:04d}"
-                    state.sessions[sid] = {"polls": 0, "title": body.get("title")}
+                    existing = body.get("idempotent") and state.idempotency.get(
+                        body["prompt"]
+                    )
+                    if existing:
+                        sid, is_new = existing, False
+                    else:
+                        state.created_payloads.append(body)
+                        sid = f"devin-stub{len(state.sessions) + 1:04d}"
+                        state.sessions[sid] = {"polls": 0, "title": body.get("title")}
+                        state.idempotency[body["prompt"]] = sid
+                        is_new = True
+                    delay = state.create_delays.pop(0) if state.create_delays else 0
+                if delay:
+                    time.sleep(delay)
                 self._send(
                     200,
                     {
                         "session_id": sid,
                         "url": f"https://app.devin.ai/sessions/{sid[6:]}",
-                        "is_new_session": True,
+                        "is_new_session": is_new,
                     },
                 )
             elif self.path.endswith("/message"):
