@@ -9,6 +9,7 @@ definitions exactly:
     customers.dat     comma-delimited   (customer.dml + customer_address.dml)
     orders.dat        pipe-delimited    (order extract, see account_balance.dml style)
     transactions.dat  pipe-delimited    (transaction_detail.dml, flattened header)
+    txn.dat           pipe-delimited    (cust_txn_summary.mp Input_File DML)
 
 The generator is deterministic (fixed seed), so it is idempotent: re-running it
 reproduces byte-identical files. That makes the "before" state durable and the
@@ -159,6 +160,23 @@ def generate_transactions(n: int, customer_ids: list[int]) -> list[str]:
     return rows
 
 
+# cust_txn_summary.mp source extract, verbatim from the legacy graph package.
+# Exercises every rule in the graph: untrimmed txn_id/currency, lower-case
+# currency, blank channel (-> "UNKNOWN"), negative and zero amounts (rejected by
+# `amount > 0`), and a non-GBP currency.
+CUST_TXN_ROWS = [
+    "T001|101|2026-01-05|120.50|gbp|web",
+    "T002|101|2026-01-09|30.00| GBP |branch",
+    "T003|102|2026-01-06|75.25|GBP|",
+    "T004|103|2026-01-07|-15.00|GBP|web",
+    "T005|102|2026-01-11|10.75|GBP|mobile",
+    "T006|104|2026-01-02|0.00|GBP|web",
+    "T007|105|2026-01-12|999.99|EUR|",
+    "T008|101|2026-01-03|5.00|GBP|mobile",
+    " T009 |106|2026-01-15|42.00|GBP|branch",
+]
+
+
 def write_file(path: Path, rows: list[str]) -> None:
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     print(
@@ -184,6 +202,7 @@ def main() -> None:
     write_file(RAW_DIR / "customers.dat", customers)
     write_file(RAW_DIR / "orders.dat", orders)
     write_file(RAW_DIR / "transactions.dat", transactions)
+    write_file(RAW_DIR / "txn.dat", CUST_TXN_ROWS)
     print("Done. These files are the durable 'before' state for reconciliation.")
 
 

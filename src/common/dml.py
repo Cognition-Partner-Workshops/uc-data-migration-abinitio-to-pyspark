@@ -16,6 +16,7 @@ Delimiters come straight from the DML:
     customer.dml / customer_address.dml -> comma-delimited
     order extract / account_balance.dml -> pipe-delimited
     transaction_detail.dml              -> pipe-delimited (flattened header)
+    cust_txn_summary.mp read_metadata   -> pipe-delimited (txn.dat)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from pathlib import Path
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    DateType,
     DecimalType,
     IntegerType,
     LongType,
@@ -82,13 +84,34 @@ TRANSACTION_SCHEMA = StructType(
     ]
 )
 
+# cust_txn_summary.mp Input_File read_metadata (txn.dat), pipe-delimited:
+#   string("|") txn_id; decimal("|") cust_id; date("YYYY-MM-DD")("|") txn_date;
+#   decimal("|", 2) amount; string("|") currency;
+#   string("\n") channel = NULL("");
+# The NULL("") clause (blank channel -> NULL) is applied in the job, not here.
+CUST_TXN_SCHEMA = StructType(
+    [
+        StructField("txn_id", StringType(), False),
+        StructField("cust_id", LongType(), False),
+        StructField("txn_date", DateType(), False),
+        StructField("amount", DecimalType(12, 2), False),
+        StructField("currency", StringType(), False),
+        StructField("channel", StringType(), True),
+    ]
+)
+
 
 def _read_delimited(
-    spark: SparkSession, filename: str, schema: StructType, sep: str
+    spark: SparkSession,
+    filename: str,
+    schema: StructType,
+    sep: str,
+    options: dict[str, str] | None = None,
 ) -> DataFrame:
     path = str(RAW_DIR / filename)
     return (
-        spark.read.option("sep", sep)
+        spark.read.options(**(options or {}))
+        .option("sep", sep)
         .option("header", "false")
         # Ab Initio reads blank fields as empty strings, not nulls. Disable
         # Spark's default empty-string->null coercion so the null("...") DML
@@ -113,6 +136,22 @@ def read_orders(spark: SparkSession) -> DataFrame:
 def read_transactions(spark: SparkSession) -> DataFrame:
     """Read transactions.dat per transaction_detail.dml (pipe-delimited)."""
     return _read_delimited(spark, "transactions.dat", TRANSACTION_SCHEMA, "|")
+
+
+def read_cust_txn(spark: SparkSession) -> DataFrame:
+    """Read txn.dat per the cust_txn_summary.mp Input_File DML (pipe-delimited).
+
+    FAILFAST mirrors the Ab Initio Input_File: a record that does not parse
+    against the DML (bad decimal/date) aborts the graph rather than being
+    silently nulled, which is Spark's PERMISSIVE default.
+    """
+    return _read_delimited(
+        spark,
+        "txn.dat",
+        CUST_TXN_SCHEMA,
+        "|",
+        {"mode": "FAILFAST", "dateFormat": "yyyy-MM-dd"},
+    )
 
 
 def trimmed(df: DataFrame) -> DataFrame:

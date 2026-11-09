@@ -28,6 +28,7 @@ DML lives in the source repo's `dml/`; the PySpark equivalents are in
 | `date("YYYY-MM-DD")` | `order_date` | `to_date(...)` → `DateType` |
 | `datetime("YYYY-MM-DD HH24:MI:SS")` | `txn_timestamp` | `to_timestamp(...)` → `TimestampType` |
 | `string(..., null("UNKNOWN"))` | `channel` default | `coalesce(nullif(trim(col), ''), lit('UNKNOWN'))` |
+| `string(...) col = NULL("")` + `first_defined(col, "X")` | `cust_txn_summary.mp` channel | `coalesce(nullif(col, ''), lit('X'))` (no trim) |
 | `[item_count]` variable array | `item_names[]` | `ArrayType` / `explode` for flatten |
 | `packed_decimal` / `zoned_decimal` | `packed_account.dml` | decode to `DecimalType` on read |
 | delimiter (`","`, `"\|"`, `";"`) | per record | `spark.read.option("sep", ...)` |
@@ -42,7 +43,7 @@ DML lives in the source repo's `dml/`; the PySpark equivalents are in
 | Ab Initio component | PySpark |
 |---|---|
 | Reformat | `select` / `withColumn` |
-| Filter by Expression | `where` / `filter` |
+| Filter by Expression | `where` / `filter` (deselect port → `where(~expr)`) |
 | Join (inner/outer) | `DataFrame.join(..., how=...)` |
 | Rollup | `groupBy().agg()` |
 | Dedup Sorted | `dropDuplicates` / window `row_number()` |
@@ -57,6 +58,7 @@ DML lives in the source repo's `dml/`; the PySpark equivalents are in
 | Customer snapshot (`run_customer_cdc.ksh` step 1) | `src/jobs/stg_customers.py` | on `main` | input-file + reformat → staging |
 | Daily orders extract→staging (`run_daily_orders.ksh` ph.1-3) | `src/jobs/stg_orders.py` | on `main` | typed read + date parse |
 | Orders production rollover (`run_daily_orders.ksh` ph.4) | `src/jobs/mart_daily_orders.py` | on `main` | rollup → `groupBy().agg()` |
+| Customer txn summary (`cust_txn_summary.mp`, `run_cust_txn_summary.ksh`) | `src/jobs/cust_txn_summary.py` → `marts/cust_txn_summary` (+ `intermediate/cust_txn_rejects`, `intermediate/cust_txn_clean`) | converted | reformat + filter/deselect + sorted rollup |
 | Transactions detail (`transaction_detail.dml`) | `src/jobs/stg_transactions.py` → `curated/transactions` | **live conversion** | flatten nested line items + DML defaults |
 | Customer CDC (`cdc_processor.py`, `customer_cdc.pset`) | `src/jobs/cdc_customers.py` | **live conversion** | compare-by-key + row hash → Delta MERGE analog |
 
