@@ -184,7 +184,7 @@ def _unescape(literal: str) -> str:
 
 class _DmlParser:
     def __init__(self, text: str):
-        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
         text = re.sub(r"//[^\n]*", " ", text)
         self.toks = _DML_TOKEN.findall(text)
         self.i = 0
