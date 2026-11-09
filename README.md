@@ -31,7 +31,9 @@ failed. Outputs land under `out/<NS>/` so multiple runs never collide.
 ├── data/raw/                     # legacy "before" flat-file extracts (durable)
 │   ├── customers.dat             #   comma-delimited (customer.dml + customer_address.dml)
 │   ├── orders.dat                #   pipe-delimited  (order extract)
-│   └── transactions.dat          #   pipe-delimited  (transaction_detail.dml)
+│   ├── transactions.dat          #   pipe-delimited  (transaction_detail.dml)
+│   └── txn.dat                   #   pipe-delimited  (cust_txn_summary.mp Input_File DML)
+├── legacy/cust_txn_summary/      # Ab Initio source for the converted graph (.mp + .ksh, read-only)
 ├── seed/generate_source.py       # deterministic (re)generator for data/raw/  (make seed)
 ├── src/
 │   ├── common/
@@ -41,7 +43,8 @@ failed. Outputs land under `out/<NS>/` so multiple runs never collide.
 │   ├── jobs/                     # converted PySpark jobs (one per table)
 │   │   ├── stg_customers.py      #   customer snapshot graph
 │   │   ├── stg_orders.py         #   daily orders extract -> staging
-│   │   └── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   ├── mart_daily_orders.py  #   orders production rollover -> daily mart
+│   │   └── cust_txn_summary.py   #   cust_txn_summary.mp -> customer txn summary mart
 │   └── run_pipeline.py           # orchestrator (PySpark analogue of the .ksh wrappers)
 ├── verify/reconcile.py           # source -> target reconciliation harness (CI gate)
 ├── tests/test_reconcile.py       # end-to-end pytest
@@ -65,6 +68,11 @@ extracts and the converted tables:
 | `orders_completeness` | staging orders = source orders (no loss / fan-out) |
 | `orders_control_total` | mart `SUM(total_amount)` ties out to source `SUM(amount)` |
 | `orders_daily_parity` | per `order_date`, count + total match the source |
+| `cust_txn_completeness` | every txn.dat row is summarised or rejected; one summary row per customer |
+| `cust_txn_control_total` | summary `SUM(total_amount)` = source `SUM(amount > 0)`; source total = summary + rejects |
+| `cust_txn_summary_parity` | per `cust_id`, `txn_count` / `total_amount` / `last_txn_date` match the source |
+| `cust_txn_rejects_parity` | rejects = exactly the cleaned txns with `amount <= 0` |
+| `cust_txn_reformat_parity` | Clean_Txn reformat incl. `NULL("")` + `first_defined(channel, "UNKNOWN")` default |
 | `transactions_channel_parity` | curated channel applies the DML `null("UNKNOWN")` default (live-conversion target) |
 
 `verify/reconcile.py` exits non-zero on any FAIL, so it doubles as the CI gate.
