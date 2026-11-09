@@ -13,7 +13,12 @@ import shutil
 import pytest
 
 from src.common.io import OUT_ROOT
-from src.jobs import mart_daily_orders, stg_customers, stg_orders
+from src.jobs import (
+    emp_data_process_v4,
+    mart_daily_orders,
+    stg_customers,
+    stg_orders,
+)
 from src.common.spark import build_spark
 from verify.reconcile import Reconciler
 
@@ -27,6 +32,7 @@ def built_namespace():
     stg_customers.run(spark, NS)
     stg_orders.run(spark, NS)
     mart_daily_orders.run(spark, NS)
+    emp_data_process_v4.run(spark, NS, "20260611", "1")
     spark.stop()
     yield
     shutil.rmtree(OUT_ROOT / NS, ignore_errors=True)
@@ -43,6 +49,11 @@ def test_outputs_exist():
         ("staging", "customers"),
         ("staging", "orders"),
         ("marts", "daily_orders"),
+        ("intermediate", "emp_v4_scan"),
+        ("curated", "emp_vectors_op"),
+        ("curated", "emp_count"),
+        ("files", "vectors_op.dat"),
+        ("files", "count_file.dat"),
     ]:
         assert (OUT_ROOT / NS / layer / table).exists()
 
@@ -54,6 +65,10 @@ def test_main_controls_pass():
         "orders_completeness",
         "orders_control_total",
         "orders_daily_parity",
+        "emp_v4_completeness",
+        "emp_v4_control_total",
+        "emp_v4_vectors_op_parity",
+        "emp_v4_flat_file_parity",
     ]:
         assert results[name].status == "PASS", f"{name}: {results[name].detail}"
 
