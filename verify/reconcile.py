@@ -19,7 +19,10 @@ a prerequisite (e.g. the live-converted transactions curated table) has not been
 produced yet, and PASS otherwise. The script exits non-zero if any control FAILs,
 so it doubles as a CI / pre-merge gate.
 
-Controls present on ``main`` cover the customer and orders pipelines. Converting a
+Controls present on ``main`` cover the customer and orders pipelines, plus the
+``emp_data_process_v4`` graph (``emp_v4_*``), whose expected output is computed by
+an independent pure-Python model of the graph over the raw files rather than by
+re-running the PySpark job. Converting a
 new program (transactions, customer-CDC) adds its matching controls here — see
 .workshop/playbooks/abinitio-to-pyspark-conversion.devin.md and
 .agents/skills/abinitio-to-pyspark-conversion/SKILL.md for the contract.
@@ -32,8 +35,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 # Make 'src' importable when run as a script (python verify/reconcile.py).
@@ -44,6 +49,49 @@ from pyspark.sql import functions as F  # noqa: E402
 from src.common import dml  # noqa: E402
 from src.common.io import OUT_ROOT, layer_path  # noqa: E402
 from src.common.spark import build_spark  # noqa: E402
+from src.jobs.emp_data_process_v4 import is_condition_true  # noqa: E402
+
+EMP_V4_THRESHOLD = Decimal(2000)
+EMP_V4_PARITY_COLS = ["emp_id", "emp_name", "location", "dept", "cum_salary", "rating"]
+
+
+def _raw_lines(filename: str) -> list[str]:
+    text = (dml.RAW_DIR / filename).read_text(encoding="utf-8")
+    return [line for line in text.split("\n") if line != ""]
+
+
+def _dml_decimal(value: Decimal) -> str:
+    """Render a Decimal the way a delimited decimal("|") field prints it."""
+    return format(value.normalize(), "f")
+
+
+def emp_v4_reference() -> tuple[list[dict], list[dict]]:
+    """Independent model of emp_data_process_v4.mp over data/raw/, record by
+    record in serial-layout order. Returns (out0 records, out1 records)."""
+    normalized = []
+    for line in _raw_lines("vectors_inp.dat"):
+        dept, emp_ids, ratings = line.split("|")
+        rating_vec = ratings.split(",")
+        pairs = [(e, rating_vec[k]) for k, e in enumerate(emp_ids.split(","))]
+        normalized += [(dept, e, r) for e, r in sorted(pairs)]
+    emp_rows = [line.split("|") for line in _raw_lines("emp_data.dat")]
+    seen, cum, out0, out1 = set(), {}, [], []
+    for dept, emp_id, rating in normalized:
+        for name, location, salary, e_id in emp_rows:
+            if e_id != emp_id or emp_id in seen:
+                continue
+            seen.add(emp_id)
+            cum[dept] = cum.get(dept, Decimal(0)) + Decimal(salary)
+            rec = {
+                "emp_id": emp_id,
+                "emp_name": name.strip(" ").upper(),
+                "location": "UK " + location,
+                "dept": dept,
+                "cum_salary": cum[dept],
+                "rating": rating,
+            }
+            (out0 if cum[dept] > EMP_V4_THRESHOLD else out1).append(rec)
+    return out0, out1
 
 
 @dataclass
@@ -207,6 +255,155 @@ class Reconciler:
             )
         )
 
+    # ----------------------------------------------- emp_data_process_v4 graph
+    def _emp_v4_inputs(self):
+        if not self._target_exists("curated", "emp_vectors_op"):
+            return None
+        params = Path(OUT_ROOT / self.ns / "files" / "emp_data_process_v4.params.json")
+        if not hasattr(self, "_emp_v4_ref"):
+            self._emp_v4_ref = emp_v4_reference()
+        return json.loads(params.read_text(encoding="utf-8")), *self._emp_v4_ref
+
+    def _emp_v4_skip(self, name: str):
+        self.results.append(
+            CheckResult(name, "SKIP", "curated.emp_vectors_op not produced yet")
+        )
+
+    def check_emp_v4_completeness(self):
+        """Every source employee that survives the inner Join + Dedup must land in
+        exactly one output port: out0 (vectors_op.dat) or out1 (Get_Count)."""
+        inputs = self._emp_v4_inputs()
+        if inputs is None:
+            return self._emp_v4_skip("emp_v4_completeness")
+        _, ref0, ref1 = inputs
+        scan = self._read_target("intermediate", "emp_v4_scan")
+        out0 = self._read_target("curated", "emp_vectors_op")
+        n_scan, n_out0 = scan.count(), out0.count()
+        n_distinct = out0.select("emp_id").distinct().count()
+        ok = (
+            n_scan == len(ref0) + len(ref1)
+            and n_out0 == len(ref0)
+            and n_distinct == n_out0
+        )
+        self.results.append(
+            CheckResult(
+                "emp_v4_completeness",
+                "PASS" if ok else "FAIL",
+                f"source joined+deduped employees = {len(ref0) + len(ref1)}, "
+                f"scan = {n_scan}; expected out0 = {len(ref0)}, "
+                f"vectors_op = {n_out0} ({n_distinct} distinct emp_id)",
+                {"expected_out0": len(ref0), "actual_out0": n_out0},
+            )
+        )
+
+    def check_emp_v4_control_total(self):
+        """SUM(cum_salary) of vectors_op must tie out to the source-derived total,
+        and the Get_Count rollup must equal the out1 population when
+        PROCESS_COUNT enables it (and be absent when it does not)."""
+        inputs = self._emp_v4_inputs()
+        if inputs is None:
+            return self._emp_v4_skip("emp_v4_control_total")
+        params, ref0, ref1 = inputs
+        exp_total = sum((r["cum_salary"] for r in ref0), Decimal(0))
+        act_total = (
+            self._read_target("curated", "emp_vectors_op")
+            .agg(F.sum("cum_salary"))
+            .collect()[0][0]
+        ) or Decimal(0)
+        count_enabled = is_condition_true(params["PROCESS_COUNT"])
+        has_count = self._target_exists("curated", "emp_count")
+        if count_enabled:
+            exp_counts = [len(ref1)] if ref1 else []
+            act_counts = (
+                [r[0] for r in self._read_target("curated", "emp_count").collect()]
+                if has_count
+                else None
+            )
+        else:
+            exp_counts, act_counts = None, (["present"] if has_count else None)
+        ok = Decimal(act_total) == exp_total and exp_counts == act_counts
+        self.results.append(
+            CheckResult(
+                "emp_v4_control_total",
+                "PASS" if ok else "FAIL",
+                f"source SUM(cum_salary>2000) = {_dml_decimal(exp_total)}, "
+                f"vectors_op = {_dml_decimal(Decimal(act_total))}; "
+                f"PROCESS_COUNT={params['PROCESS_COUNT']!r}: expected count_file "
+                f"{exp_counts}, actual {act_counts}",
+                {"expected": str(exp_total), "actual": str(act_total)},
+            )
+        )
+
+    def check_emp_v4_vectors_op_parity(self):
+        """Per emp_id, every vectors_op value (trimmed/upper-cased name, 'UK '
+        location, dept, cum_salary, rating) must match the source model, every
+        record must satisfy the cum_salary > 2000 discriminator, and
+        process_date/timestamp must carry the run's PROCESS_DATE / now1()."""
+        inputs = self._emp_v4_inputs()
+        if inputs is None:
+            return self._emp_v4_skip("emp_v4_vectors_op_parity")
+        params, ref0, _ = inputs
+        rows = self._read_target("curated", "emp_vectors_op").collect()
+        actual = {r["emp_id"]: {c: r[c] for c in EMP_V4_PARITY_COLS} for r in rows}
+        expected = {r["emp_id"]: r for r in ref0}
+        bad_keys = sorted(
+            k for k in set(actual) | set(expected) if actual.get(k) != expected.get(k)
+        )
+        bad_threshold = sum(1 for r in rows if r["cum_salary"] <= EMP_V4_THRESHOLD)
+        bad_dates = sum(
+            1
+            for r in rows
+            if r["process_date"].strftime("%Y%m%d") != params["PROCESS_DATE"]
+            or r["timestamp"].strftime("%Y%m%d %H:%M:%S") != params["job_timestamp"]
+        )
+        ok = not bad_keys and not bad_threshold and not bad_dates
+        self.results.append(
+            CheckResult(
+                "emp_v4_vectors_op_parity",
+                "PASS" if ok else "FAIL",
+                f"{len(bad_keys)} emp_id(s) diverge from source"
+                + (f" (e.g. {bad_keys[:3]})" if bad_keys else "")
+                + f"; {bad_threshold} record(s) with cum_salary <= 2000; "
+                f"{bad_dates} record(s) with wrong process_date/timestamp",
+                {"mismatched_emp_ids": len(bad_keys)},
+            )
+        )
+
+    def check_emp_v4_flat_file_parity(self):
+        """vectors_op.dat must be byte-for-byte the legacy pipe-delimited layout
+        (EMP_VECTORS_OP_DML), in Scan arrival order."""
+        inputs = self._emp_v4_inputs()
+        if inputs is None:
+            return self._emp_v4_skip("emp_v4_flat_file_parity")
+        params, ref0, _ = inputs
+        expected = [
+            "|".join(
+                [params["PROCESS_DATE"], params["job_timestamp"]]
+                + [
+                    _dml_decimal(r[c]) if c == "cum_salary" else r[c]
+                    for c in EMP_V4_PARITY_COLS
+                ]
+            )
+            for r in ref0
+        ]
+        out_dir = OUT_ROOT / self.ns / "files" / "vectors_op.dat"
+        actual = [
+            line
+            for part in sorted(out_dir.glob("part-*"))
+            for line in part.read_text(encoding="utf-8").splitlines()
+        ]
+        n_bad = sum(1 for a, e in zip(actual, expected) if a != e)
+        n_bad += abs(len(actual) - len(expected))
+        self.results.append(
+            CheckResult(
+                "emp_v4_flat_file_parity",
+                "PASS" if n_bad == 0 else "FAIL",
+                f"vectors_op.dat: {len(actual)} line(s) vs {len(expected)} expected, "
+                f"{n_bad} divergent",
+                {"divergent_lines": n_bad},
+            )
+        )
+
     # ------------------------------------------------------------------- driver
     def run(self) -> bool:
         self.check_customers_completeness()
@@ -214,6 +411,10 @@ class Reconciler:
         self.check_orders_control_total()
         self.check_orders_daily_parity()
         self.check_transactions_channel_parity()
+        self.check_emp_v4_completeness()
+        self.check_emp_v4_control_total()
+        self.check_emp_v4_vectors_op_parity()
+        self.check_emp_v4_flat_file_parity()
         self.spark.stop()
         return all(r.status != "FAIL" for r in self.results)
 
